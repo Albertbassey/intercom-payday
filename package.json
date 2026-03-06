@@ -1,0 +1,37 @@
+{
+  "name": "intercom-payday",
+  "version": "1.0.0",
+  "description": "Autonomous agent task manager with USDT tipping powered by WDK on Solana, built on Intercom P2P sidechannels",
+  "type": "module",
+  "main": "agent/wallet-agent.js",
+  "scripts": {
+    "agent": "node agent/wallet-agent.js",
+    "ui": "npx serve ui/intercom-payday",
+    "dev": "npx concurrently \"npm run ui\" \"npm run agent\""
+  },
+  "dependencies": {
+    "@tetherto/wdk-wallet-solana": "^1.0.0-beta.4",
+    "dotenv": "^16.6.1",
+    "groq-sdk": "^0.3.3"
+  },
+  "devDependencies": {
+    "concurrently": "^8.0.0",
+    "serve": "^14.0.0"
+  },
+  "keywords": [
+    "intercom",
+    "trac",
+    "wdk",
+    "tether",
+    "solana",
+    "usdt",
+    "p2p",
+    "autonomous-agent",
+    "tipping-bot"
+  ],
+  "author": "Albertbassey",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

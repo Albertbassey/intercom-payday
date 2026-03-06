@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>IntercomPayday — Autonomous Agent Wallet Network</title>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+<!-- BOOT SCREEN -->
+<div id="boot" class="boot-screen">
+  <div class="boot-inner">
+    <div class="boot-logo-main">INTERCOM</div>
+    <div class="boot-logo-sub">PAYDAY</div>
+    <div class="boot-tagline">Autonomous Agent Wallet Network · Powered by Tether WDK</div>
+    <div class="boot-bar-wrap">
+      <div class="boot-bar" id="bootBar"></div>
+    </div>
+    <div class="boot-status" id="bootStatus">Initialising...</div>
+    <div class="boot-log" id="bootLog"></div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" class="app hidden">
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">INTERCOM<span>PAYDAY</span></div>
+      <div class="tagline">Tether WDK · Solana · Groq Llama 3</div>
+    </div>
+    <div class="header-center">
+      <div class="net-pill">
+        <span class="net-dot"></span>
+        <span id="networkLabel">Solana Devnet</span>
+        <span class="net-sep">|</span>
+        <span id="peerCount">4 peers</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="wallet-hud">
+        <div class="wallet-hud-label">WDK WALLET</div>
+        <div class="wallet-hud-addr" id="walletAddr">Loading...</div>
+        <div class="wallet-hud-bal"><span id="walletBal">0.00</span> <span class="bal-unit">USDT</span></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- BODY -->
+  <div class="body-grid">
+
+    <!-- LEFT SIDEBAR -->
+    <aside class="left-sidebar">
+
+      <!-- AI AGENT CARD -->
+      <div class="panel">
+        <div class="panel-hd"><span class="pdot gold"></span>AI AGENT</div>
+        <div class="agent-hero">
+          <div class="agent-orb" id="agentOrb">
+            <div class="orb-ring"></div>
+            <div class="orb-core">AI</div>
+          </div>
+          <div class="agent-hero-info">
+            <div class="agent-hero-name">PaydayAgent</div>
+            <div class="agent-hero-model">Groq · Llama 3 · WDK</div>
+            <div class="agent-hero-status" id="agentStatus">Connecting...</div>
+          </div>
+        </div>
+        <div class="reasoning-box">
+          <div class="reasoning-hd">
+            <span class="reasoning-dot"></span>AGENT REASONING
+          </div>
+          <div class="reasoning-text" id="reasoningText">Waiting for tasks...</div>
+        </div>
+      </div>
+
+      <!-- PEERS -->
+      <div class="panel">
+        <div class="panel-hd"><span class="pdot green"></span>PEERS ONLINE</div>
+        <div class="peers-list">
+          <div class="peer-row highlight-row">
+            <div class="peer-av gold-av">PA</div>
+            <div class="peer-info">
+              <div class="peer-name">PaydayAgent <span class="you-tag">YOU</span></div>
+              <div class="peer-sub" id="mainAgentStatus">Active</div>
+            </div>
+            <div class="online-dot gold-glow-dot"></div>
+          </div>
+          <div class="peer-row">
+            <div class="peer-av amber-av">A7</div>
+            <div class="peer-info">
+              <div class="peer-name">Agent-7f3a</div>
+              <div class="peer-sub">Active</div>
+            </div>
+            <div class="online-dot amber-dot"></div>
+          </div>
+          <div class="peer-row">
+            <div class="peer-av blue-av">OC</div>
+            <div class="peer-info">
+              <div class="peer-name">OpenClaw-1</div>
+              <div class="peer-sub">Active</div>
+            </div>
+            <div class="online-dot blue-dot"></div>
+          </div>
+          <div class="peer-row">
+            <div class="peer-av green-av">SB</div>
+            <div class="peer-info">
+              <div class="peer-name">SwapBot-α</div>
+              <div class="peer-sub">Idle</div>
+            </div>
+            <div class="online-dot dim-dot"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STATS -->
+      <div class="panel">
+        <div class="panel-hd"><span class="pdot blue"></span>STATS</div>
+        <div class="stats-grid">
+          <div class="stat-cell">
+            <div class="stat-num" id="statCompleted">0</div>
+            <div class="stat-lbl">Completed</div>
+          </div>
+          <div class="stat-cell">
+            <div class="stat-num gold-num" id="statTips">0</div>
+            <div class="stat-lbl">Payments</div>
+          </div>
+          <div class="stat-cell wide-cell">
+            <div class="stat-num gold-num" id="statTotal">0.00 USDT</div>
+            <div class="stat-lbl">Total Paid Out via WDK</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONFIG -->
+      <div class="panel">
+        <div class="panel-hd"><span class="pdot purple"></span>PAYMENT CONFIG</div>
+        <div class="cfg-list">
+          <div class="cfg-row">
+            <span class="cfg-lbl">Tip per task</span>
+            <div class="cfg-right">
+              <input type="number" id="tipAmount" value="0.10" step="0.01" min="0.01" class="cfg-input"/>
+              <span class="cfg-unit">USDT</span>
+            </div>
+          </div>
+          <div class="cfg-row">
+            <span class="cfg-lbl">Auto-pay on complete</span>
+            <div class="toggle-wrap">
+              <input type="checkbox" id="autoTip" checked class="tcb"/>
+              <label for="autoTip" class="tlbl"></label>
+            </div>
+          </div>
+          <div class="cfg-row">
+            <span class="cfg-lbl">AI reasoning</span>
+            <div class="toggle-wrap">
+              <input type="checkbox" id="aiReasoning" checked class="tcb"/>
+              <label for="aiReasoning" class="tlbl"></label>
+            </div>
+          </div>
+          <div class="cfg-row">
+            <span class="cfg-lbl">Network</span>
+            <select id="networkSelect" class="cfg-select">
+              <option value="devnet">Solana Devnet</option>
+              <option value="mainnet">Solana Mainnet</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- BOARD -->
+    <section class="board-section">
+      <div class="board-toolbar">
+        <div class="board-title">TASK BOARD</div>
+        <div class="board-toolbar-right">
+          <div class="filter-tabs">
+            <button class="ftab active" data-filter="all">All</button>
+            <button class="ftab" data-filter="high">🔴 High</button>
+            <button class="ftab" data-filter="medium">🟡 Med</button>
+            <button class="ftab" data-filter="low">🟢 Low</button>
+          </div>
+          <button class="btn-gold" id="btnNewTask">+ NEW TASK</button>
+        </div>
+      </div>
+
+      <div class="kanban">
+        <div class="k-col">
+          <div class="k-col-hd">
+            <span class="k-col-title">TO DO</span>
+            <span class="k-badge" id="count-todo">0</span>
+          </div>
+          <div class="k-body" id="body-todo"></div>
+        </div>
+        <div class="k-col">
+          <div class="k-col-hd">
+            <span class="k-col-title">IN PROGRESS</span>
+            <span class="k-badge blue-badge" id="count-inprogress">0</span>
+          </div>
+          <div class="k-body" id="body-inprogress"></div>
+        </div>
+        <div class="k-col">
+          <div class="k-col-hd done-hd">
+            <span class="k-col-title">DONE & PAID</span>
+            <span class="k-badge gold-badge" id="count-done">0</span>
+          </div>
+          <div class="k-body" id="body-done"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT SIDEBAR -->
+    <aside class="right-sidebar">
+      <div class="panel feed-panel">
+        <div class="panel-hd">
+          <span class="pdot red"></span>LIVE FEED
+          <span class="live-tag">LIVE</span>
+        </div>
+        <div class="feed-list" id="feedList"></div>
+      </div>
+
+      <div class="panel tx-panel">
+        <div class="panel-hd"><span class="pdot gold"></span>TRANSACTIONS</div>
+        <div class="tx-list" id="txList">
+          <div class="tx-empty">No transactions yet</div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<!-- MODAL -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-hd">
+      <div class="modal-title">NEW TASK</div>
+      <button class="modal-x" id="btnClose">✕</button>
+    </div>
+    <div class="form-grp">
+      <label>Title</label>
+      <input type="text" id="taskTitle" placeholder="What should the agent do?" class="form-inp"/>
+    </div>
+    <div class="form-grp">
+      <label>Description</label>
+      <textarea id="taskDesc" placeholder="Details..." class="form-ta"></textarea>
+    </div>
+    <div class="form-row2">
+      <div class="form-grp">
+        <label>Assign To</label>
+        <select id="taskAssignee" class="form-sel">
+          <option value="PaydayAgent">PaydayAgent (You)</option>
+          <option value="Agent-7f3a">Agent-7f3a</option>
+          <option value="OpenClaw-1">OpenClaw-1</option>
+          <option value="SwapBot-α">SwapBot-α</option>
+          <option value="Unassigned">Unassigned</option>
+        </select>
+      </div>
+      <div class="form-grp">
+        <label>Priority</label>
+        <select id="taskPriority" class="form-sel">
+          <option value="high">🔴 High</option>
+          <option value="medium" selected>🟡 Medium</option>
+          <option value="low">🟢 Low</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-grp">
+      <label>WDK Tip (USDT)</label>
+      <input type="number" id="taskTip" value="0.10" step="0.01" min="0.01" class="form-inp"/>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="btnCancel">Cancel</button>
+      <button class="btn-gold" id="btnCreate">Create Task</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast" class="toast hidden"><span id="toastMsg"></span></div>
+
+<!-- PAYMENT OVERLAY -->
+<div id="payOverlay" class="pay-overlay hidden">
+  <div class="pay-anim">
+    <div class="pay-rings">
+      <div class="pay-ring pr1"></div>
+      <div class="pay-ring pr2"></div>
+      <div class="pay-ring pr3"></div>
+    </div>
+    <div class="pay-emoji">💸</div>
+    <div class="pay-title" id="payTitle">Sending Payment...</div>
+    <div class="pay-amount" id="payAmount"></div>
+    <div class="pay-hash" id="payHash"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
