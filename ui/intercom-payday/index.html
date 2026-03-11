@@ -14,7 +14,7 @@
   <div class="boot-inner">
     <div class="boot-logo-main">INTERCOM</div>
     <div class="boot-logo-sub">PAYDAY</div>
-    <div class="boot-tagline">Autonomous Agent Wallet Network · Powered by Tether WDK</div>
+    <div class="boot-tagline">Autonomous Agent Wallet Network · Tether WDK · Tron + Solana · Groq Llama 3</div>
     <div class="boot-bar-wrap">
       <div class="boot-bar" id="bootBar"></div>
     </div>
@@ -30,21 +30,21 @@
   <header class="header">
     <div class="header-left">
       <div class="logo">INTERCOM<span>PAYDAY</span></div>
-      <div class="tagline">Tether WDK · Tron + Solana · Groq Llama 3</div>
+      <div class="tagline">Tether WDK · Tron Mainnet + Solana Devnet · Groq Llama 3</div>
     </div>
     <div class="header-center">
       <div class="net-pill">
         <span class="net-dot"></span>
-        <span id="networkLabel">Tron Mainnet</span>
+        <span id="networkLabel">Connecting...</span>
         <span class="net-sep">|</span>
         <span id="peerCount">4 peers</span>
       </div>
     </div>
     <div class="header-right">
       <div class="wallet-hud">
-        <div class="wallet-hud-label">WDK WALLET</div>
+        <div class="wallet-hud-label">WDK TRON WALLET · USD₮ TRC20</div>
         <div class="wallet-hud-addr" id="walletAddr">Loading...</div>
-        <div class="wallet-hud-bal"><span id="walletBal">0.00</span> <span class="bal-unit">USDT</span></div>
+        <div class="wallet-hud-bal"><span id="walletBal">0.00</span> <span class="bal-unit">USD₮</span></div>
       </div>
     </div>
   </header>
@@ -73,7 +73,38 @@
           <div class="reasoning-hd">
             <span class="reasoning-dot"></span>AGENT REASONING
           </div>
-          <div class="reasoning-text" id="reasoningText">Waiting for tasks...</div>
+          <div class="reasoning-text" id="reasoningText">Connecting to agent WebSocket bridge...</div>
+        </div>
+      </div>
+
+      <!-- CHAIN STATUS -->
+      <div class="panel">
+        <div class="panel-hd"><span class="pdot green"></span>CHAIN STATUS</div>
+        <div class="chain-list">
+          <div class="chain-row">
+            <div class="chain-badge tron-badge">TRX</div>
+            <div class="chain-info">
+              <div class="chain-name">Tron Mainnet</div>
+              <div class="chain-sub">USD₮ TRC20 · Real payments</div>
+            </div>
+            <div class="online-dot gold-glow-dot"></div>
+          </div>
+          <div class="chain-row">
+            <div class="chain-badge sol-badge">SOL</div>
+            <div class="chain-info">
+              <div class="chain-name">Solana Devnet</div>
+              <div class="chain-sub">Agent proofs · Coordination</div>
+            </div>
+            <div class="online-dot blue-dot"></div>
+          </div>
+          <div class="chain-row">
+            <div class="chain-badge ws-badge">WS</div>
+            <div class="chain-info">
+              <div class="chain-name">Agent Bridge</div>
+              <div class="chain-sub" id="wsStatus">ws://localhost:8080</div>
+            </div>
+            <div class="online-dot" id="wsDot" style="background:var(--amber)"></div>
+          </div>
         </div>
       </div>
 
@@ -85,7 +116,7 @@
             <div class="peer-av gold-av">PA</div>
             <div class="peer-info">
               <div class="peer-name">PaydayAgent <span class="you-tag">YOU</span></div>
-              <div class="peer-sub" id="mainAgentStatus">Active</div>
+              <div class="peer-sub" id="mainAgentStatus">Connecting...</div>
             </div>
             <div class="online-dot gold-glow-dot"></div>
           </div>
@@ -129,8 +160,8 @@
             <div class="stat-lbl">Payments</div>
           </div>
           <div class="stat-cell wide-cell">
-            <div class="stat-num gold-num" id="statTotal">0.00 USDT</div>
-            <div class="stat-lbl">Total Paid Out via WDK</div>
+            <div class="stat-num gold-num" id="statTotal">0.00 USD₮</div>
+            <div class="stat-lbl">Total Paid · Tron Mainnet · WDK</div>
           </div>
         </div>
       </div>
@@ -143,7 +174,7 @@
             <span class="cfg-lbl">Tip per task</span>
             <div class="cfg-right">
               <input type="number" id="tipAmount" value="0.10" step="0.01" min="0.01" class="cfg-input"/>
-              <span class="cfg-unit">USDT</span>
+              <span class="cfg-unit">USD₮</span>
             </div>
           </div>
           <div class="cfg-row">
@@ -161,10 +192,10 @@
             </div>
           </div>
           <div class="cfg-row">
-            <span class="cfg-lbl">Network</span>
+            <span class="cfg-lbl">Payment chain</span>
             <select id="networkSelect" class="cfg-select">
-                <option value="tron-mainnet" selected>Tron Mainnet</option>
-                <option value="sol-devnet">Solana Devnet</option>
+              <option value="tron-mainnet" selected>Tron Mainnet (USD₮)</option>
+              <option value="sol-devnet">Solana Devnet (SOL)</option>
             </select>
           </div>
         </div>
@@ -223,7 +254,7 @@
       </div>
 
       <div class="panel tx-panel">
-        <div class="panel-hd"><span class="pdot gold"></span>TRANSACTIONS</div>
+        <div class="panel-hd"><span class="pdot gold"></span>TRANSACTIONS · TRON MAINNET</div>
         <div class="tx-list" id="txList">
           <div class="tx-empty">No transactions yet</div>
         </div>
@@ -269,7 +300,7 @@
       </div>
     </div>
     <div class="form-grp">
-      <label>WDK Tip (USDT)</label>
+      <label>WDK Tip (USD₮ · Tron Mainnet)</label>
       <input type="number" id="taskTip" value="0.10" step="0.01" min="0.01" class="form-inp"/>
     </div>
     <div class="modal-actions">
@@ -293,6 +324,7 @@
     <div class="pay-emoji">💸</div>
     <div class="pay-title" id="payTitle">Sending Payment...</div>
     <div class="pay-amount" id="payAmount"></div>
+    <div class="pay-chain">WDK Tron · USD₮ TRC20 · Mainnet</div>
     <div class="pay-hash" id="payHash"></div>
   </div>
 </div>

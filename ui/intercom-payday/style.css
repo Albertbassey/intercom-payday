@@ -656,3 +656,36 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+
+/* ═══ CHAIN STATUS PANEL (append to style.css) ════════════ */
+.chain-list { padding: 5px; }
+.chain-row {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 5px; border-radius: var(--r);
+  transition: background 0.12s;
+  border-bottom: 1px solid var(--border);
+}
+.chain-row:last-child { border-bottom: none; }
+.chain-row:hover { background: var(--bg3); }
+
+.chain-badge {
+  width: 30px; height: 20px; border-radius: 3px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-m); font-size: 8px; font-weight: 700;
+  flex-shrink: 0; letter-spacing: 1px;
+}
+.tron-badge { background: rgba(240,192,64,0.12); color: var(--gold); border: 1px solid rgba(240,192,64,0.3); }
+.sol-badge  { background: rgba(168,85,247,0.12); color: var(--purple); border: 1px solid rgba(168,85,247,0.3); }
+.ws-badge   { background: rgba(59,130,246,0.12); color: var(--blue); border: 1px solid rgba(59,130,246,0.3); }
+
+.chain-info { flex: 1; min-width: 0; }
+.chain-name { font-size: 11px; font-weight: 500; color: var(--text); }
+.chain-sub  { font-family: var(--font-m); font-size: 8px; color: var(--muted); margin-top: 1px; }
+
+/* ═══ PAY OVERLAY CHAIN LABEL ══════════════════════════════ */
+.pay-chain {
+  font-family: var(--font-m); font-size: 9px;
+  letter-spacing: 2px; color: var(--gold);
+  opacity: 0.6; margin-bottom: 8px;
+  text-transform: uppercase;
+}

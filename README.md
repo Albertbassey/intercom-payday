@@ -1,6 +1,6 @@
 # IntercomPayday 💸
 
-> Autonomous multi-chain AI agent wallet network — agents complete tasks and receive real USD₮ payments automatically via Tether WDK on Tron mainnet, coordinated over Intercom P2P sidechannels, with Solana devnet for agent proofs.
+Autonomous multi-chain AI agent wallet network — agents complete tasks and receive real **USD₮ (TRC20)** payments automatically via Tether WDK on Tron mainnet, coordinated over Intercom P2P sidechannels, with a live WebSocket bridge to a real-time browser UI.
 
 Built for **Hackathon Galáctica: WDK Edition 1** — **Agent Wallets Track**
 
@@ -8,22 +8,30 @@ Built for **Hackathon Galáctica: WDK Edition 1** — **Agent Wallets Track**
 
 ## What It Does
 
-IntercomPayday is an autonomous agent payment network. AI agents monitor a P2P task board over Intercom sidechannels, reason about tasks using Groq Llama 3, and autonomously send real **USD₮ (TRC20)** payments via the Tether Wallet Development Kit (WDK) when tasks are completed — with zero human intervention.
+IntercomPayday is an autonomous agent payment network. AI agents monitor a P2P task board over Intercom sidechannels, reason about tasks using Groq Llama 3, and autonomously send real **USD₮ TRC20** payments via the Tether Wallet Development Kit (WDK) when tasks are completed — with zero human intervention. Every action is streamed live to a browser UI via WebSocket.
 
 ```
-Agent monitors 0000intercom P2P sidechannel
+Autonomous loop ticks every 30s — no human input required
               ↓
-Groq Llama 3 reasons: should I pick up this task?
+Agent scans network, creates task from TASK_POOL
               ↓
-Agent completes task autonomously
+Groq Llama 3 reasons: should I pick this up?
+              ↓
+Agent works on task for 15s
+              ↓
+Groq reasons: task done — send payment?
               ↓
 Safety system validates: limits, balance, permissions
               ↓
-WDK Tron wallet signs + sends USD₮ TRC20 on Tron mainnet
+WDK Tron wallet signs + sends USD₮ TRC20 to peer wallet
               ↓
-TX hash confirmed on-chain, visible on Tronscan
+TX hash confirmed on Tron mainnet → visible on Tronscan
               ↓
-WDK Solana wallet logs proof on Solana devnet
+WebSocket broadcasts real tx hash + balance to browser UI
+              ↓
+WDK Solana logs coordination proof on Solana devnet
+              ↓
+Loop immediately queues next task — runs forever
 ```
 
 ---
@@ -35,26 +43,27 @@ WDK Solana wallet logs proof on Solana devnet
 | Agent framework for reasoning | ✅ | Groq Llama 3 8B (open-source LLM — bonus!) |
 | WDK primitives directly | ✅ | `wallet.getAccount()`, `account.transfer()`, `account.getBalance()`, `account.getTokenBalance()` |
 | Agent holds/sends USD₮ autonomously | ✅ | Real USDT TRC20 transfers on Tron mainnet via WDK |
-| Clear separation: agent logic vs wallet | ✅ | `wallet-agent.js` — Groq reasons → safety checks → WDK executes |
+| Clear separation: agent logic vs wallet | ✅ | Groq reasons → safety checks → WDK executes |
 | Safety: permissions, limits, recovery | ✅ | Full dual-chain safety system — see below |
-| Open-source LLM framework | ✅ | Groq Llama 3 8B (bonus point) |
+| Open-source LLM framework | ✅ | Groq Llama 3 8B |
 | Composability with other agents | ✅ | Multi-agent P2P via Intercom (Hyperswarm) |
+| Fully autonomous — no human input | ✅ | Loop picks up tasks, works, pays, re-queues — zero CLI trigger needed |
 
 ---
 
-## Multi-Chain Architecture
+## Architecture
 
-IntercomPayday uses **two WDK wallet modules** from the same BIP-39 seed phrase:
+### Multi-Chain Wallet (one seed phrase — two chains)
 
 ```
-Your 12-word seed phrase
+Your 12-word BIP-39 seed phrase
         ↓  BIP-44 HD derivation
-┌──────────────────────┐    ┌──────────────────────┐
-│  WDK Solana          │    │  WDK Tron            │
-│  m/44'/501'/0'/0'    │    │  m/44'/195'/0'/0'    │
-│  Solana devnet       │    │  Tron mainnet        │
-│  Agent logic proofs  │    │  Real USD₮ TRC20     │
-└──────────────────────┘    └──────────────────────┘
+┌──────────────────────────┐    ┌──────────────────────────┐
+│  WDK Tron                │    │  WDK Solana              │
+│  m/44'/195'/0'/0'        │    │  m/44'/501'/0'/0'        │
+│  Tron mainnet            │    │  Solana devnet           │
+│  Real USD₮ TRC20         │    │  Agent coordination      │
+└──────────────────────────┘    └──────────────────────────┘
 ```
 
 | Chain | Purpose | Token | Network |
@@ -62,20 +71,24 @@ Your 12-word seed phrase
 | **Tron** | Real value payments to task completers | USD₮ TRC20 | Mainnet |
 | **Solana** | Agent coordination proofs, task history | SOL | Devnet |
 
----
-
-## Agent Flow
+### System Flow
 
 ```
 ┌─────────────────────────────────┐
-│     AGENT LAYER (Groq LLM)      │  ← reasons, decides, plans
-│   wallet-agent.js               │
+│   BROWSER UI (index.html)       │  ← real-time task board
+│   app.js WebSocket client       │     live balance + real tx hashes
+└────────────┬────────────────────┘
+             │ ws://localhost:8080
+             ▼
+┌─────────────────────────────────┐
+│   AGENT LAYER (Groq Llama 3)    │  ← reasons, decides, plans
+│   wallet-agent.js               │     WebSocket server :8080
 └────────────┬────────────────────┘
              │ decision
              ▼
 ┌─────────────────────────────────┐
-│      SAFETY LAYER               │  ← validates limits, permissions
-│      safetyCheck(amount, chain) │     per-chain: USDT + SOL
+│   SAFETY LAYER                  │  ← validates limits, permissions
+│   safetyCheck(amount, chain)    │     per-chain: USD₮ + SOL
 └────────────┬────────────────────┘
              │ approved
              ▼
@@ -86,55 +99,66 @@ Your 12-word seed phrase
 └─────────────────────────────────┘
 ```
 
+### WebSocket Event Protocol
+
+**Agent → UI:**
+
+| Event | Payload | Description |
+|---|---|---|
+| `balance:update` | `{ usdt, sol, tronAddress, solAddress }` | Live wallet balances |
+| `agent:reasoning` | `{ text }` | Groq reasoning streamed live |
+| `agent:action` | `{ action, details }` | Agent decision |
+| `payment:sent` | `{ txHash, amount, chain, explorer }` | Real on-chain tx confirmed |
+| `payment:blocked` | `{ reason, amount, chain }` | Safety system blocked payment |
+| `payment:queued` | `{ recipient, amount, taskName }` | Awaiting supervised approval |
+| `agent:paused` | `{ reason }` | Agent paused |
+| `agent:resumed` | `{}` | Agent resumed |
+
+**UI → Agent:**
+
+| Command | Payload | Description |
+|---|---|---|
+| `task:create` | `{ title, desc, priority, tip, assignee }` | Submit task for reasoning |
+| `task:complete` | `{ title, tip, assignee }` | Trigger real WDK payment |
+| `task:start` | `{ title }` | Move task to in-progress |
+| `agent:pause` | `{}` | Pause all payments |
+| `agent:resume` | `{}` | Resume payments |
+| `payment:confirm` | `{}` | Approve queued payment |
+| `payment:reject` | `{}` | Reject queued payment |
+| `balance:refresh` | `{}` | Force refresh from chain |
+
 ---
 
 ## Safety System
 
-Every payment on both chains passes through `safetyCheck(amount, chain)` before WDK is ever called.
+Every payment passes through `safetyCheck(amount, chain)` before WDK is ever called.
 
-### Limits (per chain)
+### Limits (configurable via `.env`)
 
-| Limit | USDT (Tron) | SOL (Solana) |
+| Limit | USD₮ (Tron) | SOL (Solana) |
 |---|---|---|
-| Max per transaction | 1.00 USDT | 0.10 SOL |
-| Daily spending cap | 2.00 USDT | 0.50 SOL |
-| Low balance warning | 1.00 USDT | 0.50 SOL |
-| Hard stop | 0.20 USDT | 0.10 SOL |
+| Max per transaction | 1.00 USD₮ | 0.10 SOL |
+| Daily spending cap | 2.00 USD₮ | 0.50 SOL |
+| Low balance warning | 1.00 USD₮ | 0.50 SOL |
+| Hard stop (auto-pause) | 0.20 USD₮ | 0.10 SOL |
 
-### Permissions
+### Payment Roles
 
-- **`autonomous` mode** — agent sends payments independently based on Groq reasoning
-- **`supervised` mode** — every payment is queued; human operator must type `confirm` or `reject`
+- **`autonomous`** — agent sends payments independently based on Groq reasoning
+- **`supervised`** — every payment is queued; operator must `confirm` or `reject`
 
 ### Recovery
 
-- If a WDK transfer fails, agent automatically refreshes wallet state from chain
-- Errors caught gracefully — agent never crashes, always recovers
-- Low balance triggers warning before hard stop
+- WDK transfer failures trigger automatic wallet state refresh from chain
+- All errors caught gracefully — agent never crashes
+- Low balance warning broadcast to UI before hard stop
+- Auto-pause triggers and notifies UI when balance drops below minimum
 
 ### Audit Log
 
 - Every decision logged: timestamp, action, result, balances on both chains
-- View with `audit` command in CLI
+- `audit` CLI command shows last 5 entries
 - Last 100 entries kept in memory per session
-
----
-
-## Architecture
-
-```
-intercom-payday/
-├── agent/
-│   └── wallet-agent.js     # WDK Tron + WDK Solana + Groq reasoning + safety system
-├── ui/
-│   └── intercom-payday/
-│       ├── index.html       # App shell
-│       ├── style.css        # Industrial-futurist UI (gold on black)
-│       └── app.js           # Task board + autonomous agent loop
-├── .env.example             # Config template (dual-chain safety limits)
-├── package.json
-└── README.md
-```
 
 ---
 
@@ -143,13 +167,33 @@ intercom-payday/
 | Layer | Technology |
 |---|---|
 | AI Reasoning | Groq Llama 3 8B (open-source LLM) |
-| Wallet (real payments) | `@tetherto/wdk-wallet-tron` |
-| Wallet (agent proofs) | `@tetherto/wdk-wallet-solana` |
+| Wallet — real payments | `@tetherto/wdk-wallet-tron` |
+| Wallet — agent proofs | `@tetherto/wdk-wallet-solana` |
+| Real-time UI bridge | `ws` (WebSocket) |
 | Real payments | USD₮ TRC20 on Tron mainnet |
 | Agent coordination | SOL on Solana devnet |
 | P2P Network | Intercom (Hyperswarm + Holepunch) |
-| Key Derivation | BIP-39 seed phrase + BIP-44 HD wallet (one seed, two chains) |
+| Key Derivation | BIP-39 + BIP-44 HD wallet (one seed, two chains) |
+| Autonomous Loop | Self-managed task queue — picks up, works, pays, re-queues with no human input |
 | Runtime | Node.js 18+ (ESM) |
+
+---
+
+## Project Structure
+
+```
+intercom-payday/
+├── agent/
+│   └── wallet-agent.js          # WDK Tron + Solana + Groq + WebSocket server + safety
+├── ui/
+│   └── intercom-payday/
+│       ├── index.html           # App shell — multi-chain UI
+│       ├── style.css            # Industrial-futurist design (gold on black)
+│       └── app.js               # WebSocket client — live task board + real tx feed
+├── .env.example                 # Dual-chain config template
+├── package.json
+└── README.md
+```
 
 ---
 
@@ -161,14 +205,17 @@ intercom-payday/
 git clone https://github.com/Albertbassey/intercom-payday.git
 cd intercom-payday
 npm install
-npm install @tetherto/wdk-wallet-tron
+npm install @tetherto/wdk-wallet-tron ws
 ```
 
 ### 2. Configure
 
 ```bash
 cp .env.example .env
-# Fill in GROQ_API_KEY and SEED_PHRASE
+# Fill in:
+#   GROQ_API_KEY  — from console.groq.com
+#   SEED_PHRASE        — your 12-word BIP-39 seed phrase
+#   PEER_TRON_ADDRESS  — peer wallet address (e.g. Trust Wallet TRC20) that receives payments
 ```
 
 ### 3. Get Your Wallet Addresses
@@ -179,14 +226,16 @@ node agent/wallet-agent.js
 
 On startup the agent prints both addresses:
 ```
-Address (Solana) : <your-solana-address>
-Address (Tron)   : <your-tron-address>
+Address (Tron)   : T...your-tron-address
+Address (Solana) : ...your-solana-address
 ```
 
 ### 4. Fund Your Wallets
 
-- **Tron address** → Send USD₮ TRC20 (minimum ~$2 recommended for demo)
+- **Tron address** → Send USD₮ TRC20 (~$2 minimum for demo)
+  - Swap TRX → USDT TRC20 on [SunSwap](https://sun.io), send to your Tron address
 - **Solana address** → Get free devnet SOL: https://faucet.solana.com
+- **Peer wallet** → Set `PEER_TRON_ADDRESS` in `.env` to any external TRC20 wallet (e.g. Trust Wallet). The agent will autonomously send real USD₮ here when it completes tasks — confirming true cross-wallet payments on Tron mainnet
 
 ### 5. Run the Agent
 
@@ -194,26 +243,25 @@ Address (Tron)   : <your-tron-address>
 node agent/wallet-agent.js
 ```
 
+WebSocket server starts automatically on `ws://localhost:8080`.
+
 ### 6. Open the UI
 
-Open `ui/intercom-payday/index.html` in your browser.
+Open `ui/intercom-payday/index.html` in your browser. The UI connects to the agent automatically — real wallet balances, Groq reasoning, and confirmed Tron tx hashes all update live.
 
 ---
 
 ## Agent CLI Commands
 
 ```
-PaydayAgent > task <title> <priority> <tip>   — submit task for AI evaluation (tip in USDT)
-PaydayAgent > complete <title>               — complete task + trigger USDT payment
-PaydayAgent > think <question>               — ask Groq to reason about anything
-PaydayAgent > tip <tron-address> <amount>    — manual USDT TRC20 payment via WDK Tron
-PaydayAgent > soltip <sol-address> <amount>  — manual SOL payment via WDK Solana (devnet)
-PaydayAgent > balance                        — check USDT + SOL balances (both chains)
-PaydayAgent > safety                         — show dual-chain safety limits & daily spend
-PaydayAgent > audit                          — show last 5 audit log entries
-PaydayAgent > memory                         — show session stats
-PaydayAgent > pause                          — suspend all payments (both chains)
-PaydayAgent > resume                         — re-enable payments
+PaydayAgent > tip <tron-address> <amount>    — manual USD₮ TRC20 payment via WDK
+PaydayAgent > loop                           — show autonomous loop queue (todo/in-progress/done)
+PaydayAgent > balance                        — refresh + show USD₮ + SOL balances
+PaydayAgent > safety                         — dual-chain safety limits & daily spend
+PaydayAgent > audit                          — last 5 audit log entries
+PaydayAgent > clients                        — number of connected UI clients
+PaydayAgent > pause                          — suspend all payments (broadcasts to UI)
+PaydayAgent > resume                         — re-enable payments (broadcasts to UI)
 PaydayAgent > confirm                        — approve queued payment (supervised mode)
 PaydayAgent > reject                         — reject queued payment (supervised mode)
 PaydayAgent > quit                           — graceful shutdown with summary
@@ -227,32 +275,28 @@ PaydayAgent > quit                           — graceful shutdown with summary
 import WalletManagerSolana from '@tetherto/wdk-wallet-solana'
 import WalletManagerTron   from '@tetherto/wdk-wallet-tron'
 
-// One seed phrase — two chains
+// One BIP-39 seed phrase — two chains, two WDK wallet instances
 const solWallet  = new WalletManagerSolana(seedPhrase, { rpcUrl, transferMaxFee })
 const tronWallet = new WalletManagerTron(seedPhrase,   { provider, transferMaxFee })
 
-const solAccount  = await solWallet.getAccount(0)
 const tronAccount = await tronWallet.getAccount(0)
 
 // Real USD₮ TRC20 transfer via WDK Tron
-const check = safetyCheck(amount, 'usdt')
-if (!check.safe) return
-
 const result = await tronAccount.transfer({
   token:     'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', // USDT TRC20 mainnet
   recipient: recipientAddress,
   amount:    BigInt(Math.round(amount * 1_000_000))  // 6 decimals
 })
 
-console.log('TX confirmed:', result.hash)
-// https://tronscan.org/#/transaction/<hash>
+// Real verifiable tx on Tronscan
+console.log(`https://tronscan.org/#/transaction/${result.hash}`)
 ```
 
 ---
 
 ## Built on Intercom
 
-This project extends the [Intercom P2P stack](https://github.com/Trac-Systems/intercom). Agents coordinate over Intercom sidechannels (Hyperswarm DHT + Noise XX protocol) and settle payments on-chain via WDK — creating a foundation for truly autonomous economic agents that can hold, earn, and spend real value.
+This project extends the [Intercom P2P stack](https://github.com/Trac-Systems/intercom). Agents coordinate over Intercom sidechannels (Hyperswarm DHT + Noise XX protocol) and settle payments on-chain via WDK — creating a foundation for truly autonomous economic agents that hold, earn, and spend real value across multiple chains.
 
 ---
 

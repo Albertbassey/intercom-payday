@@ -1,47 +1,227 @@
 /* ═══════════════════════════════════════════════════════════
    INTERCOM PAYDAY — app.js
    Autonomous Multi-Chain Agent Wallet Network
-   Tether WDK: Tron mainnet (USD₮ TRC20) + Solana devnet
-   Groq Llama 3 · Intercom P2P
+   WebSocket client → wallet-agent.js (real WDK transactions)
    ═══════════════════════════════════════════════════════════ */
 'use strict';
 
 // ── CONFIG ───────────────────────────────────────────────
 const CFG = {
-  agentName:        'PaydayAgent',
-  usdtContract:     'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', // USDT TRC20 mainnet
-  channel:          '0000intercom',
-  defaultTip:       0.10,                                    // USDT
-  tronAddr:         'TPaydXkP9mNqRvL2wBcDjHsYtUiOp4FgTRX', // replaced on agent start
-  solAddr:          'PDYagt8XkP9mNqRvL2wBcDjHsYtUiOp4FgV',  // replaced on agent start
-};
-
-// Agent wallets (peers)
-const PEER_WALLETS = {
-  'PaydayAgent': { tron: 'TPaydXkP9mNqRvL2wBcDjHsYtUiOp4FgTRX', sol: 'PDYagt8XkP9mNqRvL2wBcDjHsYtUiOp4FgV' },
-  'Agent-7f3a':  { tron: 'T7f3aXkP9mNqRvL2wBcDjHsYtUiOp4FTRX', sol: '7f3aXkP9mNqRvL2wBcDjHsYtUiOp4FgVnEz' },
-  'OpenClaw-1':  { tron: 'TOCLAWmNqRvL2wBcDjHsYtUiOp4FgTronX', sol: 'OCLAWmNqRvL2wBcDjHsYtUiOp4FgVnEzAb1' },
-  'SwapBot-α':   { tron: 'TSWAPzAb1Cd5Ef8XkP9mNqRvL2wBcTronX', sol: 'SWAPzAb1Cd5Ef8XkP9mNqRvL2wBcDjHsYtU' },
+  agentName:    'PaydayAgent',
+  usdtContract: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+  channel:      '0000intercom',
+  defaultTip:   0.10,
+  wsUrl:        'ws://localhost:8080',
 };
 
 const AVATARS = {
-  'PaydayAgent': { bg: 'var(--gold-dim)',             color: 'var(--gold)',   init: 'PA' },
-  'Agent-7f3a':  { bg: 'rgba(245,158,11,0.12)',       color: 'var(--amber)',  init: 'A7' },
-  'OpenClaw-1':  { bg: 'rgba(59,130,246,0.12)',       color: 'var(--blue)',   init: 'OC' },
-  'SwapBot-α':   { bg: 'rgba(34,197,94,0.12)',        color: 'var(--green)',  init: 'SB' },
-  'Unassigned':  { bg: 'var(--bg4)',                  color: 'var(--muted)',  init: '?' },
+  'PaydayAgent': { bg: 'var(--gold-dim)',           color: 'var(--gold)',   init: 'PA' },
+  'Agent-7f3a':  { bg: 'rgba(245,158,11,0.12)',     color: 'var(--amber)',  init: 'A7' },
+  'OpenClaw-1':  { bg: 'rgba(59,130,246,0.12)',     color: 'var(--blue)',   init: 'OC' },
+  'SwapBot-α':   { bg: 'rgba(34,197,94,0.12)',      color: 'var(--green)',  init: 'SB' },
+  'Unassigned':  { bg: 'var(--bg4)',                color: 'var(--muted)',  init: '?' },
 };
 
 // ── STATE ─────────────────────────────────────────────────
 let tasks        = [];
 let nextId       = 1;
 let stats        = { completed: 0, tips: 0, total: 0 };
-let usdtBalance  = 2.00;   // Tron mainnet USD₮
-let solBalance   = 0.50;   // Solana devnet SOL
+let usdtBalance  = 0;
+let solBalance   = 0;
+let tronAddress  = '—';
+let solAddress   = '—';
 let agentBusy    = false;
 let activeFilter = 'all';
+let ws           = null;
+let wsConnected  = false;
 
-// ── SAMPLE TASKS ─────────────────────────────────────────
+// ── WEBSOCKET CLIENT ──────────────────────────────────────
+function connectWebSocket() {
+  ws = new WebSocket(CFG.wsUrl);
+
+  ws.onopen = () => {
+    wsConnected = true;
+    console.log('[WS] Connected to agent');
+    updateConnectionStatus(true);
+    addFeed('🔌', 'Connected to PaydayAgent WebSocket bridge — live data active', 'var(--green)', 'rgba(34,197,94,0.12)');
+    // Request fresh balance on connect
+    wsSend('balance:refresh', {});
+  };
+
+  ws.onclose = () => {
+    wsConnected = false;
+    updateConnectionStatus(false);
+    addFeed('⚠️', 'Agent WebSocket disconnected — retrying in 3s...', 'var(--amber)', 'rgba(245,158,11,0.12)');
+    setTimeout(connectWebSocket, 3000);
+  };
+
+  ws.onerror = () => {
+    wsConnected = false;
+    updateConnectionStatus(false);
+  };
+
+  ws.onmessage = (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch { return; }
+    handleAgentEvent(msg);
+  };
+}
+
+function wsSend(type, payload = {}) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type, ...payload }));
+  } else {
+    console.warn('[WS] Not connected — command queued locally:', type);
+  }
+}
+
+function updateConnectionStatus(connected) {
+  const dot    = document.querySelector('.net-dot');
+  const label  = document.getElementById('networkLabel');
+  const wsDot  = document.getElementById('wsDot');
+  const wsStat = document.getElementById('wsStatus');
+  if (connected) {
+    dot.style.background   = 'var(--green)';
+    dot.style.boxShadow    = '0 0 8px var(--green)';
+    label.textContent      = 'Agent Connected';
+    if (wsDot)  { wsDot.style.background = 'var(--green)'; wsDot.style.boxShadow = '0 0 6px var(--green)'; }
+    if (wsStat) wsStat.textContent = 'Connected · live';
+  } else {
+    dot.style.background   = 'var(--amber)';
+    dot.style.boxShadow    = '0 0 8px var(--amber)';
+    label.textContent      = 'Reconnecting...';
+    if (wsDot)  { wsDot.style.background = 'var(--amber)'; wsDot.style.boxShadow = 'none'; }
+    if (wsStat) wsStat.textContent = 'Reconnecting...';
+  }
+}
+
+// ── HANDLE AGENT EVENTS ───────────────────────────────────
+function handleAgentEvent(msg) {
+  const { type } = msg;
+
+  switch (type) {
+
+    case 'balance:update': {
+      usdtBalance = msg.usdt  ?? usdtBalance;
+      solBalance  = msg.sol   ?? solBalance;
+      tronAddress = msg.tronAddress ?? tronAddress;
+      solAddress  = msg.solAddress  ?? solAddress;
+      updateWalletUI();
+      break;
+    }
+
+    case 'agent:reasoning': {
+      if (msg.text) setReasoning(msg.text);
+      break;
+    }
+
+    case 'agent:status': {
+      const statusEl = document.getElementById('agentStatus');
+      const mainEl   = document.getElementById('mainAgentStatus');
+      if (statusEl) statusEl.textContent = msg.status || 'Active';
+      if (mainEl)   mainEl.textContent   = msg.status || 'Active';
+      if (msg.tasksCompleted !== undefined) stats.completed = msg.tasksCompleted;
+      if (msg.totalPaidUsdt  !== undefined) stats.total     = msg.totalPaidUsdt;
+      updateStats();
+      break;
+    }
+
+    case 'agent:action': {
+      const { action, details } = msg;
+      addFeed('⚡', `Agent decision: ${action} — ${details?.title || ''}`, 'var(--gold)', 'var(--gold-dim)');
+      break;
+    }
+
+    case 'payment:sent': {
+      const { txHash, amount, chain, taskName, explorer } = msg;
+
+      // Update stats
+      stats.tips++;
+      stats.total  += amount;
+      usdtBalance   = Math.max(0, usdtBalance - (chain === 'tron' ? amount : 0));
+      updateWalletUI();
+      updateStats();
+
+      // Mark matching task as done+paid
+      const t = tasks.find(x => x.title === taskName && x.status !== 'done');
+      if (t) {
+        t.status  = 'done';
+        t.txHash  = txHash;
+        t.chain   = chain;
+        t.paid    = true;
+        stats.completed++;
+        renderAll();
+      }
+
+      // Add real tx to transaction list
+      addTx(amount, txHash, taskName, 'confirmed', chain, explorer);
+
+      // Feed + overlay
+      const chainLabel = chain === 'tron' ? 'Tron mainnet' : 'Solana devnet';
+      addFeed('✅', `WDK confirmed: ${amount} USD₮ sent on ${chainLabel}`, 'var(--gold)', 'var(--gold-dim)');
+      addFeed('🔗', `TX: ${txHash.slice(0, 24)}... → ${explorer}`, 'var(--muted)', 'var(--bg3)');
+      hidePayOverlay(txHash, amount);
+      showToast(`💸 ${amount} USD₮ sent on ${chainLabel}!`);
+      break;
+    }
+
+    case 'payment:blocked': {
+      const { reason, amount, chain } = msg;
+      hidePayOverlayImmediately();
+      addFeed('🛡️', `Payment blocked: ${reason}`, 'var(--red)', 'rgba(239,68,68,0.12)');
+      showToast(`⛔ Payment blocked: ${reason}`);
+      break;
+    }
+
+    case 'payment:queued': {
+      const { amount, taskName } = msg;
+      addFeed('⏳', `Supervised: ${amount} USDT queued for "${taskName}" — confirm/reject in CLI`, 'var(--amber)', 'rgba(245,158,11,0.12)');
+      showToast(`⏳ Payment queued — approve in agent CLI`);
+      break;
+    }
+
+    case 'task:pickedup': {
+      const { title, assignee } = msg;
+      const t = tasks.find(x => x.title === title && x.status === 'todo');
+      if (t) { t.status = 'inprogress'; t.assignee = assignee || 'PaydayAgent'; renderAll(); }
+      addFeed('🤖', `Agent picked up: "${title}"`, 'var(--gold)', 'var(--gold-dim)');
+      break;
+    }
+
+    case 'task:created': {
+      const { title, priority, tip } = msg;
+      tasks.push({
+        id: nextId++, title,
+        desc:     'Created by autonomous agent',
+        assignee: 'PaydayAgent',
+        priority: priority || 'medium',
+        tip:      tip || CFG.defaultTip,
+        status:   'todo',
+      });
+      renderAll();
+      addFeed('➕', `Agent created task: "${title}"`, 'var(--green)', 'rgba(34,197,94,0.12)');
+      break;
+    }
+
+    case 'agent:paused': {
+      document.getElementById('agentStatus').textContent     = 'Paused';
+      document.getElementById('mainAgentStatus').textContent = 'Paused';
+      addFeed('⛔', `Agent paused: ${msg.reason || ''}`, 'var(--red)', 'rgba(239,68,68,0.12)');
+      showToast('⛔ Agent paused');
+      break;
+    }
+
+    case 'agent:resumed': {
+      document.getElementById('agentStatus').textContent     = 'Active';
+      document.getElementById('mainAgentStatus').textContent = 'Active';
+      addFeed('✅', 'Agent resumed — payments re-enabled', 'var(--green)', 'rgba(34,197,94,0.12)');
+      showToast('✅ Agent resumed');
+      break;
+    }
+  }
+}
+
+// ── SEED TASKS ────────────────────────────────────────────
 const SEED_TASKS = [
   {
     title:    'Monitor 0000intercom for RFQ requests',
@@ -63,15 +243,6 @@ const SEED_TASKS = [
     desc:     'Post service announcement — sidechannels have no history so must repeat.',
     assignee: 'SwapBot-α', priority: 'low', tip: 0.05, status: 'todo',
   },
-  {
-    title:    'Process completed USD₮ swap settlement',
-    desc:     'Finalise swap and release USD₮ TRC20 to counterparty via WDK Tron.',
-    assignee: 'PaydayAgent', priority: 'high', tip: 0.20,
-    status: 'done',
-    txHash:   '8f3a2b1c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a',
-    chain:    'tron',
-    paid:     true,
-  },
 ];
 
 // ── BOOT ──────────────────────────────────────────────────
@@ -83,32 +254,29 @@ async function boot() {
   const log    = document.getElementById('bootLog');
 
   const steps = [
-    [8,  'normal', 'Connecting to Hyperswarm DHT...'],
-    [18, 'normal', 'Noise XX handshake with peers...'],
-    [28, 'g',      '✓ P2P connection established — 4 peers'],
-    [38, 'normal', 'Initialising WDK Solana wallet (devnet)...'],
-    [48, 'g',      '✓ WDK Solana ready — ' + CFG.solAddr.slice(0,14) + '...'],
-    [58, 'normal', 'Initialising WDK Tron wallet (mainnet)...'],
-    [68, 'g',      '✓ WDK Tron ready — ' + CFG.tronAddr.slice(0,14) + '...'],
-    [76, 'normal', 'Loading USD₮ TRC20 balance on Tron...'],
-    [84, 'y',      `◈ USD₮ balance: ${usdtBalance.toFixed(2)} USDT (Tron mainnet)`],
-    [91, 'normal', 'Connecting Groq Llama 3 reasoning engine...'],
-    [97, 'g',      '✓ AI agent online — multi-chain ready'],
-    [100,'g',      '✓ PaydayAgent ready'],
+    [10, 'normal', 'Connecting to Hyperswarm DHT...'],
+    [22, 'normal', 'Noise XX handshake with peers...'],
+    [34, 'g',      '✓ P2P connection established'],
+    [46, 'normal', 'Connecting to PaydayAgent WebSocket bridge...'],
+    [58, 'normal', 'Awaiting WDK wallet addresses...'],
+    [70, 'normal', 'Loading USD₮ TRC20 balance (Tron mainnet)...'],
+    [82, 'normal', 'Syncing Solana devnet state...'],
+    [92, 'g',      '✓ Groq Llama 3 reasoning engine online'],
+    [100,'g',      '✓ IntercomPayday ready — dual-chain WDK active'],
   ];
 
   for (const [pct, cls, msg] of steps) {
-    bar.style.width = pct + '%';
+    bar.style.width    = pct + '%';
     status.textContent = msg;
-    const line = document.createElement('div');
-    line.className = 'blog-line' + (cls !== 'normal' ? ' ' + cls : '');
-    line.textContent = '> ' + msg;
+    const line         = document.createElement('div');
+    line.className     = 'blog-line' + (cls !== 'normal' ? ' ' + cls : '');
+    line.textContent   = '> ' + msg;
     log.appendChild(line);
     if (log.children.length > 5) log.removeChild(log.firstChild);
     await sleep(260 + Math.random() * 160);
   }
 
-  await sleep(500);
+  await sleep(400);
   document.getElementById('boot').style.opacity = '0';
   await sleep(500);
   document.getElementById('boot').classList.add('hidden');
@@ -121,35 +289,25 @@ function initApp() {
   updateWalletUI();
   loadSeedTasks();
   bindEvents();
-  startAgentLoop();
   startNetworkChatter();
+  connectWebSocket();
 
-  addFeed('🔗', 'Connected to 0000intercom via Hyperswarm DHT', 'var(--blue)', 'rgba(59,130,246,0.12)');
-  addFeed('🤖', 'PaydayAgent online — Groq Llama 3 reasoning active', 'var(--gold)', 'var(--gold-dim)');
-  addFeed('💎', `WDK Tron loaded — ${usdtBalance.toFixed(2)} USD₮ TRC20 available (mainnet)`, 'var(--green)', 'rgba(34,197,94,0.12)');
-  addFeed('⬡',  `WDK Solana loaded — ${solBalance.toFixed(4)} SOL available (devnet)`, 'var(--purple)', 'rgba(168,85,247,0.12)');
-
-  setReasoning('Monitoring 0000intercom channel. Dual-chain WDK ready: USD₮ TRC20 (Tron mainnet) + SOL (Solana devnet).');
-  document.getElementById('agentStatus').textContent = 'Active';
-  document.getElementById('mainAgentStatus').textContent = 'Active';
+  setReasoning('Connecting to PaydayAgent... waiting for WebSocket bridge.');
+  document.getElementById('agentStatus').textContent     = 'Connecting...';
+  document.getElementById('mainAgentStatus').textContent = 'Connecting...';
 }
 
 function updateWalletUI() {
-  const shortTron = CFG.tronAddr.slice(0, 10) + '...' + CFG.tronAddr.slice(-6);
-  document.getElementById('walletAddr').textContent = shortTron;
+  const shortAddr = tronAddress.length > 12
+    ? tronAddress.slice(0, 10) + '...' + tronAddress.slice(-6)
+    : tronAddress;
+  document.getElementById('walletAddr').textContent = shortAddr;
   document.getElementById('walletBal').textContent  = usdtBalance.toFixed(2);
 }
 
 // ── LOAD TASKS ────────────────────────────────────────────
 function loadSeedTasks() {
   SEED_TASKS.forEach(t => tasks.push({ id: nextId++, ...t }));
-  tasks.filter(t => t.status === 'done' && t.paid).forEach(t => {
-    stats.completed++;
-    stats.tips++;
-    stats.total += t.tip;
-    addTx(t.tip, t.txHash, t.assignee, 'confirmed', t.chain || 'tron');
-  });
-  updateStats();
   renderAll();
 }
 
@@ -162,10 +320,10 @@ function renderAll() {
 function renderCol(status) {
   const body  = document.getElementById(`body-${status}`);
   const count = document.getElementById(`count-${status}`);
-  let cols = tasks.filter(t => t.status === status);
+  let   cols  = tasks.filter(t => t.status === status);
   if (activeFilter !== 'all') cols = cols.filter(t => t.priority === activeFilter);
   count.textContent = cols.length;
-  body.innerHTML = '';
+  body.innerHTML    = '';
   cols.forEach(t => body.appendChild(buildCard(t)));
 }
 
@@ -194,8 +352,8 @@ function buildCard(task) {
 function buildActions(task) {
   if (task.status === 'todo') {
     return `<div class="task-btns">
-      <button class="t-btn start" onclick="moveTask(${task.id},'inprogress')">▶ START</button>
-      <button class="t-btn" onclick="deleteTask(${task.id})">✕ REMOVE</button>
+      <button class="t-btn start"  onclick="moveTask(${task.id},'inprogress')">▶ START</button>
+      <button class="t-btn"        onclick="deleteTask(${task.id})">✕ REMOVE</button>
     </div>`;
   }
   if (task.status === 'inprogress') {
@@ -204,13 +362,13 @@ function buildActions(task) {
     </div>`;
   }
   if (task.status === 'done') {
-    const chain   = task.chain || 'tron';
-    const baseUrl = chain === 'tron'
+    const chain    = task.chain || 'tron';
+    const explorer = chain === 'tron'
       ? `https://tronscan.org/#/transaction/${task.txHash}`
       : `https://explorer.solana.com/tx/${task.txHash}?cluster=devnet`;
     const chainLabel = chain === 'tron' ? 'Tron' : 'Solana';
     return `<div class="paid-stamp">✓ PAID [${chainLabel}] —
-      <a href="${baseUrl}" target="_blank">${task.txHash ? task.txHash.slice(0, 18) + '...' : 'simulated'}</a>
+      <a href="${explorer}" target="_blank">${task.txHash ? task.txHash.slice(0, 18) + '...' : 'pending'}</a>
     </div>`;
   }
   return '';
@@ -222,21 +380,22 @@ window.moveTask = function(id, status) {
   if (!t) return;
   t.status = status;
   renderAll();
+  // Notify agent
+  wsSend('task:start', { title: t.title });
   addFeed('▶', `Task started: "${t.title}"`, 'var(--blue)', 'rgba(59,130,246,0.12)');
   showToast('Task moved to In Progress');
-  setReasoning(`Task "${t.title}" is now in progress. Monitoring for completion...`);
 };
 
-window.completeTask = async function(id) {
+window.completeTask = function(id) {
   const t = tasks.find(x => x.id === id);
   if (!t) return;
-  t.status = 'done';
-  renderAll();
-  addFeed('✓', `Task complete: "${t.title}" — AI agent evaluating USD₮ payment...`, 'var(--green)', 'rgba(34,197,94,0.12)');
-  setReasoning(`Analysing: "${t.title}" — checking USD₮ balance and safety limits before authorising WDK Tron payment...`);
 
-  const autoTip = document.getElementById('autoTip').checked;
-  if (autoTip) await sendPayment(t);
+  // Show payment overlay immediately — real tx is in flight
+  showPayOverlay(`Sending ${t.tip} USD₮`, `→ ${t.assignee} via WDK Tron`);
+  addFeed('💸', `Triggering WDK payment: ${t.tip} USD₮ → ${t.assignee}`, 'var(--gold)', 'var(--gold-dim)');
+
+  // Send to real agent — it will broadcast payment:sent or payment:blocked back
+  wsSend('task:complete', { title: t.title, tip: t.tip, assignee: t.assignee });
 };
 
 window.deleteTask = function(id) {
@@ -245,55 +404,14 @@ window.deleteTask = function(id) {
   showToast('Task removed');
 };
 
-// ── WDK PAYMENT (USD₮ TRC20 via Tron mainnet) ────────────
-async function sendPayment(task) {
-  const amount    = task.tip;
-  const recipient = PEER_WALLETS[task.assignee]?.tron || PEER_WALLETS['PaydayAgent'].tron;
-
-  showPayOverlay(`Sending ${amount} USD₮`, `→ ${task.assignee} (Tron mainnet)`);
-  addFeed('💸', `WDK Tron: Initiating USD₮ TRC20 transfer → ${task.assignee} (${amount} USDT)`, 'var(--gold)', 'var(--gold-dim)');
-  addFeed('🔐', `WDK: Signing with BIP-44 keypair m/44'/195'/0'/0' (Tron path)`, 'var(--purple)', 'rgba(168,85,247,0.12)');
-  addFeed('📡', `WDK: Broadcasting to Tron mainnet (${CFG.usdtContract.slice(0,16)}...)`, 'var(--muted)', 'var(--bg3)');
-  setReasoning(`Authorised: sending ${amount} USD₮ to ${task.assignee}. WDK Tron executing TRC20 transfer...`);
-
-  await sleep(1600 + Math.random() * 800);
-
-  const txHash = genTronHash();
-  task.txHash = txHash;
-  task.chain  = 'tron';
-  task.paid   = true;
-
-  stats.completed++;
-  stats.tips++;
-  stats.total  += amount;
-  usdtBalance   = Math.max(0, usdtBalance - amount);
-
-  updateWalletUI();
-  updateStats();
-  renderAll();
-
-  hidePayOverlay(txHash, amount);
-  addTx(amount, txHash, task.assignee, 'confirmed', 'tron');
-  addFeed('✅', `WDK Tron confirmed: ${amount} USD₮ TRC20 sent to ${task.assignee}`, 'var(--gold)', 'var(--gold-dim)');
-  addFeed('🔗', `TX: ${txHash.slice(0, 24)}... | tronscan.org/#/transaction/...`, 'var(--muted)', 'var(--bg3)');
-  setReasoning(`Payment confirmed on Tron mainnet. ${amount} USD₮ sent to ${task.assignee}. Total: ${stats.total.toFixed(2)} USD₮.`);
-  showToast(`💸 ${amount} USD₮ sent to ${task.assignee}!`);
-}
-
 // ── EVENTS ────────────────────────────────────────────────
 function bindEvents() {
-  document.getElementById('btnNewTask').onclick  = () => document.getElementById('modal').classList.remove('hidden');
-  document.getElementById('btnCancel').onclick   = closeModal;
-  document.getElementById('btnClose').onclick    = closeModal;
-  document.getElementById('btnCreate').onclick   = createTask;
+  document.getElementById('btnNewTask').onclick = () => document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('btnCancel').onclick  = closeModal;
+  document.getElementById('btnClose').onclick   = closeModal;
+  document.getElementById('btnCreate').onclick  = createTask;
   document.getElementById('modal').onclick = e => {
     if (e.target === document.getElementById('modal')) closeModal();
-  };
-
-  document.getElementById('networkSelect').onchange = e => {
-    const lbl = e.target.value === 'tron-mainnet' ? 'Tron Mainnet' : 'Solana Devnet';
-    document.getElementById('networkLabel').textContent = lbl;
-    addFeed('🔄', `Viewing ${lbl} chain`, 'var(--amber)', 'rgba(245,158,11,0.12)');
   };
 
   document.querySelectorAll('.ftab').forEach(btn => {
@@ -321,93 +439,15 @@ function createTask() {
 
   if (!title) { showToast('Please enter a task title'); return; }
 
+  // Add to local UI immediately
   tasks.push({ id: nextId++, title, desc: desc || 'No description.', assignee, priority, tip, status: 'todo' });
   closeModal();
   renderAll();
-  addFeed('➕', `New task: "${title}" → ${assignee}`, 'var(--green)', 'rgba(34,197,94,0.12)');
-  showToast('Task created!');
-  setReasoning(`New task: "${title}". Evaluating priority and USD₮ budget before pick-up...`);
-}
 
-// ── AUTONOMOUS AGENT LOOP ─────────────────────────────────
-function startAgentLoop() {
-  setInterval(async () => {
-    if (agentBusy) return;
-    const roll = Math.random();
-    if (roll < 0.30)      await agentPickUp();
-    else if (roll < 0.55) await agentComplete();
-    else if (roll < 0.72) await agentCreate();
-    else                   agentBroadcast();
-  }, 10000);
-}
-
-async function agentPickUp() {
-  const todos  = tasks.filter(t => t.status === 'todo');
-  if (!todos.length) return;
-  const highs  = todos.filter(t => t.priority === 'high');
-  const target = highs.length ? highs[0] : todos[0];
-
-  agentBusy = true;
-  document.getElementById('agentStatus').textContent = 'Picking up task...';
-  setReasoning(`Groq Llama 3: "${target.title}" is ${target.priority} priority. USD₮ balance: ${usdtBalance.toFixed(2)}. Decision: PICK_UP`);
-  addFeed('🤖', `PaydayAgent (AI): Claiming task — "${target.title}"`, 'var(--gold)', 'var(--gold-dim)');
-
-  await sleep(1800);
-  target.status   = 'inprogress';
-  target.assignee = 'PaydayAgent';
-  renderAll();
-  showToast(`🤖 Agent picked up: "${target.title}"`);
-  document.getElementById('agentStatus').textContent = 'Working...';
-  agentBusy = false;
-}
-
-async function agentComplete() {
-  const mine   = tasks.filter(t => t.status === 'inprogress' && t.assignee === 'PaydayAgent');
-  const any    = tasks.filter(t => t.status === 'inprogress');
-  const target = mine.length ? mine[0] : (any.length ? any[0] : null);
-  if (!target) return;
-
-  agentBusy = true;
-  document.getElementById('agentStatus').textContent = 'Completing...';
-  setReasoning(`Groq Llama 3: "${target.title}" done. USD₮ balance: ${usdtBalance.toFixed(2)}. Sending ${target.tip} USD₮ via WDK Tron. Decision: SEND_TIP`);
-  addFeed('🤖', `PaydayAgent (AI): Completing — "${target.title}"`, 'var(--gold)', 'var(--gold-dim)');
-
-  await sleep(2000);
-  target.status = 'done';
-  renderAll();
-
-  if (document.getElementById('autoTip').checked) await sendPayment(target);
-
-  document.getElementById('agentStatus').textContent = 'Active';
-  agentBusy = false;
-}
-
-const NEW_TASKS = [
-  { title: 'Check Tron escrow liquidity',        desc: 'Verify USD₮ outbound capacity before next swap.',       priority: 'high',   tip: 0.25 },
-  { title: 'Remove stale RFQ quotes',            desc: 'Purge expired quotes from sidechannel.',                priority: 'medium', tip: 0.10 },
-  { title: 'Re-announce service on rendezvous',  desc: 'Broadcast svc_announce to 0000intercom.',              priority: 'low',    tip: 0.05 },
-  { title: 'Validate Noise handshakes',          desc: 'Check all peers have valid XX handshakes.',             priority: 'medium', tip: 0.10 },
-  { title: 'Monitor USD₮ escrow timeouts',       desc: 'Scan open trades for approaching Tron deadline.',      priority: 'high',   tip: 0.25 },
-];
-
-async function agentCreate() {
-  agentBusy = true;
-  const t = NEW_TASKS[Math.floor(Math.random() * NEW_TASKS.length)];
-  setReasoning(`Groq Llama 3: Network analysis detected action needed. Creating: "${t.title}". Decision: CREATE_TASK`);
-  addFeed('🤖', `PaydayAgent (AI): Creating task — "${t.title}"`, 'var(--gold)', 'var(--gold-dim)');
-  await sleep(1200);
-  tasks.push({ id: nextId++, ...t, assignee: 'PaydayAgent', status: 'todo' });
-  renderAll();
-  showToast(`🤖 Agent created: "${t.title}"`);
-  agentBusy = false;
-}
-
-function agentBroadcast() {
-  const done = tasks.filter(t => t.status === 'done').length;
-  const ip   = tasks.filter(t => t.status === 'inprogress').length;
-  const todo = tasks.filter(t => t.status === 'todo').length;
-  setReasoning(`Groq Llama 3: ${todo} queued, ${ip} active, ${done} complete. USD₮ balance: ${usdtBalance.toFixed(2)}. Total paid: ${stats.total.toFixed(2)} USD₮. Decision: BROADCAST`);
-  addFeed('📡', `PaydayAgent broadcast: ${todo} queued / ${ip} active / ${done} paid (${stats.total.toFixed(2)} USD₮)`, 'var(--purple)', 'rgba(168,85,247,0.12)');
+  // Send to agent for reasoning
+  wsSend('task:create', { title, desc, priority, tip, assignee });
+  addFeed('➕', `New task: "${title}" → ${assignee} — agent evaluating...`, 'var(--green)', 'rgba(34,197,94,0.12)');
+  showToast('Task created — agent is reasoning...');
 }
 
 // ── NETWORK CHATTER ───────────────────────────────────────
@@ -421,7 +461,6 @@ function startNetworkChatter() {
     ['⬡',  'WDK Tron: RPC latency 38ms (trongrid.io)',           'var(--muted)',  'var(--bg3)'],
     ['📡', 'SwapBot-α broadcast RFQ on sidechannel',             'var(--amber)',  'rgba(245,158,11,0.12)'],
     ['🔗', 'WDK Solana: devnet RPC latency 44ms',                'var(--muted)',  'var(--bg3)'],
-    ['💎', `USD₮ balance: ${usdtBalance.toFixed(2)} USDT (Tron mainnet)`, 'var(--gold)', 'var(--gold-dim)'],
   ];
 
   setInterval(() => {
@@ -429,7 +468,7 @@ function startNetworkChatter() {
     addFeed(...m);
     document.getElementById('peerCount').textContent =
       (3 + Math.floor(Math.random() * 4)) + ' peers';
-  }, 6000 + Math.random() * 5000);
+  }, 7000 + Math.random() * 5000);
 }
 
 // ── UI HELPERS ────────────────────────────────────────────
@@ -444,22 +483,22 @@ function addFeed(icon, text, color, bg) {
   el.innerHTML = `
     <div class="feed-ico" style="background:${bg};color:${color}">${icon}</div>
     <div class="feed-body">
-      <div class="feed-text">${text}</div>
+      <div class="feed-text">${esc(text)}</div>
       <div class="feed-time">${nowTime()}</div>
     </div>`;
   list.insertBefore(el, list.firstChild);
   while (list.children.length > 35) list.removeChild(list.lastChild);
 }
 
-function addTx(amount, hash, agentName, status, chain = 'tron') {
+function addTx(amount, hash, label, status, chain = 'tron', explorerUrl) {
   const list  = document.getElementById('txList');
   const empty = list.querySelector('.tx-empty');
   if (empty) empty.remove();
 
-  const url = chain === 'tron'
+  const url        = explorerUrl || (chain === 'tron'
     ? `https://tronscan.org/#/transaction/${hash}`
-    : `https://explorer.solana.com/tx/${hash}?cluster=devnet`;
-  const chainLabel = chain === 'tron' ? '🔴 TRX' : '🟣 SOL';
+    : `https://explorer.solana.com/tx/${hash}?cluster=devnet`);
+  const chainLabel = chain === 'tron' ? '🔴 Tron' : '🟣 Sol';
 
   const el = document.createElement('div');
   el.className = 'tx-item';
@@ -468,7 +507,7 @@ function addTx(amount, hash, agentName, status, chain = 'tron') {
       <div class="tx-amount">+${amount.toFixed(2)} USD₮</div>
       <div class="tx-badge ${status}">${status.toUpperCase()}</div>
     </div>
-    <div class="tx-detail">${chainLabel} → ${agentName} | <a href="${url}" target="_blank">${hash.slice(0, 22)}...</a></div>`;
+    <div class="tx-detail">${chainLabel} — ${esc(label)} | <a href="${url}" target="_blank" rel="noopener">${hash.slice(0, 22)}...</a></div>`;
   list.insertBefore(el, list.firstChild);
   while (list.children.length > 10) list.removeChild(list.lastChild);
 }
@@ -479,18 +518,28 @@ function updateStats() {
   document.getElementById('statTotal').textContent     = stats.total.toFixed(2) + ' USD₮';
 }
 
+let payOverlayTimeout = null;
+
 function showPayOverlay(title, sub) {
   document.getElementById('payTitle').textContent  = title;
   document.getElementById('payAmount').textContent = sub;
   document.getElementById('payHash').textContent   = '';
   document.getElementById('payOverlay').classList.remove('hidden');
+  // Safety timeout — hide after 30s even if no response
+  payOverlayTimeout = setTimeout(hidePayOverlayImmediately, 30_000);
 }
 
 async function hidePayOverlay(hash, amount) {
+  if (payOverlayTimeout) { clearTimeout(payOverlayTimeout); payOverlayTimeout = null; }
   document.getElementById('payTitle').textContent  = 'PAYMENT CONFIRMED ✓';
   document.getElementById('payAmount').textContent = amount + ' USD₮ sent on Tron mainnet';
   document.getElementById('payHash').textContent   = hash;
-  await sleep(2200);
+  await sleep(2400);
+  document.getElementById('payOverlay').classList.add('hidden');
+}
+
+function hidePayOverlayImmediately() {
+  if (payOverlayTimeout) { clearTimeout(payOverlayTimeout); payOverlayTimeout = null; }
   document.getElementById('payOverlay').classList.add('hidden');
 }
 
@@ -498,7 +547,7 @@ function showToast(msg) {
   const t = document.getElementById('toast');
   document.getElementById('toastMsg').textContent = msg;
   t.classList.remove('hidden');
-  setTimeout(() => t.classList.add('hidden'), 3000);
+  setTimeout(() => t.classList.add('hidden'), 3500);
 }
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -508,9 +557,4 @@ function nowTime() {
 }
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-function genTronHash() {
-  // Tron tx hashes are 64 hex chars
-  const hex = '0123456789abcdef';
-  return Array.from({ length: 64 }, () => hex[Math.floor(Math.random() * 16)]).join('');
 }
