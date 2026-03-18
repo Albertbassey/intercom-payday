@@ -1,7 +1,10 @@
 /**
- * IntercomPayday — WDK Autonomous Wallet Agent
- * Groq Llama 3 · WDK Tron mainnet (USD₮) · WDK Solana devnet · WebSocket · Autonomous Loop
+ * IntercomPayday — WDK Autonomous Wallet Agent (Agent A)
+ * Groq Llama 3 · WDK Tron mainnet (USD₮) · WDK Solana devnet · WebSocket · Hyperswarm · Autonomous Loop
  * Run: node agent/wallet-agent.js
+ *
+ * NEW: Hyperswarm P2P — broadcasts tasks on 0000intercom topic
+ *      Agent B discovers tasks, picks them up, Agent A pays Agent B's Tron address
  */
 
 import WalletManagerSolana from '@tetherto/wdk-wallet-solana';
@@ -10,6 +13,8 @@ import Groq                from 'groq-sdk';
 import { WebSocketServer } from 'ws';
 import { createInterface } from 'readline';
 import { config }          from 'dotenv';
+import Hyperswarm          from 'hyperswarm';
+import crypto              from 'crypto';
 config();
 
 const CONFIG = {
@@ -17,11 +22,11 @@ const CONFIG = {
     provider:     process.env.TRON_PROVIDER          || 'https://api.trongrid.io',
     usdtContract: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
     decimals:     6,
-    maxFee:       10_000_000,
-    defaultTip:   parseFloat(process.env.USDT_DEFAULT_TIP)    || 0.10,
-    maxTipPerTx:  parseFloat(process.env.USDT_MAX_TIP_PER_TX) || 1.00,
-    dailyCap:     parseFloat(process.env.USDT_DAILY_CAP)      || 2.00,
-    lowBal:       parseFloat(process.env.USDT_LOW_BAL)        || 1.00,
+    maxFee:       40_000_000,
+    defaultTip:   parseFloat(process.env.USDT_DEFAULT_TIP)    || 0.05,
+    maxTipPerTx:  parseFloat(process.env.USDT_MAX_TIP_PER_TX) || 0.10,
+    dailyCap:     parseFloat(process.env.USDT_DAILY_CAP)      || 0.50,
+    lowBal:       parseFloat(process.env.USDT_LOW_BAL)        || 0.30,
     minBal:       parseFloat(process.env.USDT_MIN_BAL)        || 0.20,
   },
   solana: {
@@ -57,6 +62,190 @@ const agent = {
 let globalTronAccount = null;
 let globalSolAccount  = null;
 
+// ── Hyperswarm P2P ─────────────────────────────────────────
+// peers: Map<peerName, { tronAddress, conn }>
+const swarmPeers = new Map();
+const connectedKeys = new Set(); // public keys of active connections
+let   swarm      = null;
+
+function startHyperswarm() {
+  swarm = new Hyperswarm();
+  const topic = crypto.createHash('sha256').update(CONFIG.channel).digest();
+  swarm.join(topic, { server: true, client: true });
+  console.log(`\n📡 Hyperswarm joined topic: ${CONFIG.channel}`);
+
+  swarm.on('connection', (conn, info) => {
+    const keyHex = info.publicKey.toString('hex');
+
+    // Ignore duplicate connections to same peer
+    if (connectedKeys.has(keyHex)) {
+      conn.destroy();
+      return;
+    }
+    connectedKeys.add(keyHex);
+    console.log(`\n🔗 [Hyperswarm] New peer connected`);
+
+    sendToPeer(conn, {
+      type:        'peer:hello',
+      name:        CONFIG.agentName,
+      tronAddress: agent.tronAddress,
+      role:        'payer',
+    });
+
+    conn.on('data', (raw) => {
+      raw.toString().split('\n').filter(Boolean).forEach(line => {
+        let msg; try { msg = JSON.parse(line); } catch { return; }
+        handlePeerMessage(conn, msg);
+      });
+    });
+
+    conn.on('close', () => {
+      connectedKeys.delete(keyHex);
+      for (const [name, p] of swarmPeers.entries()) {
+        if (p.conn === conn) {
+          swarmPeers.delete(name);
+          console.log(`\n🔌 [Hyperswarm] Peer disconnected: ${name}`);
+          broadcast('peer:left', { name });
+          break;
+        }
+      }
+    });
+
+    conn.on('error', (err) => console.error(`[Hyperswarm] conn error: ${err.message}`));
+  });
+
+  swarm.on('error', (err) => console.error(`[Hyperswarm] error: ${err.message}`));
+}
+
+function sendToPeer(conn, msg) {
+  try {
+    if (!conn.destroyed) conn.write(JSON.stringify(msg) + '\n');
+  } catch (err) {
+    console.error(`[Hyperswarm] sendToPeer error: ${err.message}`);
+  }
+}
+
+function broadcastToPeers(msg) {
+  for (const { conn } of swarmPeers.values()) sendToPeer(conn, msg);
+}
+
+function handlePeerMessage(conn, msg) {
+  const { type } = msg;
+
+if (type === 'peer:hello') {
+  // Already registered under this name — ignore repeat hellos
+  if (swarmPeers.has(msg.name)) return;
+
+  swarmPeers.set(msg.name, { tronAddress: msg.tronAddress, conn });
+  console.log(`\n🤝 [Hyperswarm] Peer registered: ${msg.name} | Tron: ${msg.tronAddress}`);
+  broadcast('peer:joined', { name: msg.name, tronAddress: msg.tronAddress });
+
+const pingInterval = setInterval(() => {
+  if (conn.destroyed) { clearInterval(pingInterval); return; }
+  sendToPeer(conn, { type: 'peer:ping', name: CONFIG.agentName });
+}, 20000); // every 20s
+
+  sendToPeer(conn, {
+    type:        'peer:hello',
+    name:        CONFIG.agentName,
+    tronAddress: agent.tronAddress,
+    role:        'payer',
+  });
+
+  const openTasks = taskQueue.filter(t => t.status === 'todo');
+  for (const t of openTasks) {
+    sendToPeer(conn, { type: 'task:available', id: t.id, title: t.title, desc: t.desc, priority: t.priority, tip: t.tip });
+  }
+}
+
+  else if (type === 'task:claimed') {
+    // Agent B is claiming a task
+    const task = taskQueue.find(t => t.id === msg.taskId && t.status === 'todo');
+    if (task) {
+      task.status   = 'inprogress';
+      task.assignee = msg.agentName;
+      task.claimedBy = msg.agentName;
+      console.log(`\n📋 [Hyperswarm] Task claimed by ${msg.agentName}: "${task.title}"`);
+      broadcast('task:pickedup', { title: task.title, assignee: msg.agentName });
+      broadcast('agent:reasoning', { text: `Peer ${msg.agentName} claimed "${task.title}" over Hyperswarm. Monitoring for completion...` });
+
+      // Confirm back to claimer
+      sendToPeer(conn, { type: 'task:claim:ack', taskId: task.id, title: task.title });
+    } else {
+      // Task already taken
+      sendToPeer(conn, { type: 'task:claim:nack', taskId: msg.taskId, reason: 'Already claimed or not found' });
+    }
+  }
+
+  else if (type === 'task:done') {
+    // Agent B completed — pay them
+    const task = taskQueue.find(t => t.id === msg.taskId && t.status === 'inprogress');
+    if (!task) return;
+
+    const peer = swarmPeers.get(msg.agentName);
+    if (!peer) {
+      console.log(`[Hyperswarm] Unknown peer ${msg.agentName} — cannot pay`);
+      return;
+    }
+
+    console.log(`\n✅ [Hyperswarm] ${msg.agentName} completed "${task.title}" — initiating payment`);
+    broadcast('agent:reasoning', { text: `${msg.agentName} completed "${task.title}" over Hyperswarm. Authorising WDK payment → ${peer.tronAddress.slice(0,12)}...` });
+
+    // Pay Agent B's real Tron address
+    sendUsdtPayment(globalTronAccount, peer.tronAddress, task.tip, task.title)
+      .then((result) => {
+        if (result) {
+          task.status = 'done';
+          broadcast('task:completed', { title: task.title, txHash: result.hash, tip: task.tip });
+          // Notify Agent B that payment is sent
+          sendToPeer(conn, {
+            type:    'payment:sent',
+            taskId:  task.id,
+            txHash:  result.hash,
+            amount:  task.tip,
+            chain:   'tron',
+            explorer: `https://tronscan.org/#/transaction/${result.hash}`,
+          });
+          const next = pickNewTask();
+          if (next) {
+            setTimeout(() => {
+              const newTask = enqueueTask(next);
+              // Broadcast new task to all peers
+              broadcastToPeers({
+                type:     'task:available',
+                id:       newTask.id,
+                title:    newTask.title,
+                desc:     newTask.desc,
+                priority: newTask.priority,
+                tip:      newTask.tip,
+              });
+            }, 4000);
+          }
+        } else {
+          task.createdAt = Date.now(); // retry
+        }
+      });
+  }
+
+  else if (type === 'peer:ping') {
+    sendToPeer(conn, { type: 'peer:pong', name: CONFIG.agentName });
+  }
+}
+
+// Broadcast a newly created task to all connected peers
+function broadcastTaskToPeers(task) {
+  if (swarmPeers.size === 0) return;
+  broadcastToPeers({
+    type:     'task:available',
+    id:       task.id,
+    title:    task.title,
+    desc:     task.desc,
+    priority: task.priority,
+    tip:      task.tip,
+  });
+  console.log(`\n📡 [Hyperswarm] Broadcasted task to ${swarmPeers.size} peer(s): "${task.title}"`);
+}
+
 // ── WebSocket ──────────────────────────────────────────────
 const clients = new Set();
 
@@ -70,6 +259,10 @@ function startWebSocketServer() {
     console.log(`\n🔌 UI connected (${clients.size})`);
     send(ws, 'balance:update', { usdt: agent.usdtBalance, sol: agent.solBalance, tronAddress: agent.tronAddress, solAddress: agent.solAddress });
     send(ws, 'agent:status', { status: agent.paused ? 'Paused' : 'Active', paused: agent.paused, paymentRole: CONFIG.paymentRole, tasksCompleted: agent.tasksCompleted, totalPaidUsdt: agent.totalPaidUsdt });
+    // Send current peer list to UI
+    for (const [name, p] of swarmPeers.entries()) {
+      send(ws, 'peer:joined', { name, tronAddress: p.tronAddress });
+    }
     ws.on('message', (raw) => handleUICommand(raw));
     ws.on('close', () => clients.delete(ws));
     ws.on('error', (e) => console.error(`WS: ${e.message}`));
@@ -167,7 +360,7 @@ async function agentReason(situation) {
       model: CONFIG.model, max_tokens: 200, temperature: 0.7,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user',   content: `Situation: ${situation}\nState: USDT=${agent.usdtBalance.toFixed(4)} SOL=${agent.solBalance.toFixed(6)} DailySpent=${agent.usdtDailySpent.toFixed(4)} Tasks=${agent.tasksCompleted} TotalPaid=${agent.totalPaidUsdt.toFixed(4)} Paused=${agent.paused}\nReason then ACTION.` },
+        { role: 'user',   content: `Situation: ${situation}\nState: USDT=${agent.usdtBalance.toFixed(4)} SOL=${agent.solBalance.toFixed(6)} DailySpent=${agent.usdtDailySpent.toFixed(4)} Tasks=${agent.tasksCompleted} TotalPaid=${agent.totalPaidUsdt.toFixed(4)} Paused=${agent.paused} Peers=${swarmPeers.size}\nReason then ACTION.` },
       ],
     });
     return res.choices[0]?.message?.content || 'No response. ACTION: SKIP';
@@ -310,15 +503,15 @@ let   loopBusy   = false;
 
 const TASK_POOL = [
   { title: 'Monitor 0000intercom for RFQ requests',   desc: 'Watch global rendezvous and respond to swap requests from peers.',    priority: 'high',   tip: 0.10 },
-  { title: 'Verify Tron escrow before USD₮ release',  desc: 'Check on-chain escrow state before authorising WDK payment.',        priority: 'high',   tip: 0.15 },
-  { title: 'Replicate subnet state to 3 peers',       desc: 'Ensure contract state is consistent across all active Trac peers.',  priority: 'medium', tip: 0.10 },
-  { title: 'Broadcast svc_announce to sidechannel',   desc: 'Re-post service announcement — sidechannels have no history.',       priority: 'low',    tip: 0.05 },
-  { title: 'Check Tron RPC latency and failover',     desc: 'Ping trongrid.io — switch provider if latency exceeds 500ms.',      priority: 'medium', tip: 0.08 },
-  { title: 'Validate peer Noise XX handshakes',       desc: 'Confirm all connected peers have valid encrypted channels.',         priority: 'medium', tip: 0.10 },
-  { title: 'Purge stale RFQ quotes from network',    desc: 'Remove expired quotes older than 5 minutes from the network.',      priority: 'low',    tip: 0.05 },
-  { title: 'Monitor USD₮ escrow timeout windows',    desc: 'Scan open trades for approaching Tron deadlines and alert peers.',  priority: 'high',   tip: 0.20 },
-  { title: 'Confirm swap settlement on Tron',         desc: 'Verify counterparty received USD₮ before closing the trade.',      priority: 'high',   tip: 0.15 },
-  { title: 'Sync agent state to Intercom peers',      desc: 'Broadcast current balance and task capacity to the network.',      priority: 'low',    tip: 0.05 },
+  { title: 'Verify Tron escrow before USD₮ release',  desc: 'Check on-chain escrow state before authorising WDK payment.',        priority: 'high',   tip: 0.10 },
+  { title: 'Replicate subnet state to 3 peers',       desc: 'Ensure contract state is consistent across all active Trac peers.',  priority: 'high', tip: 0.10 },
+  { title: 'Broadcast svc_announce to sidechannel',   desc: 'Re-post service announcement — sidechannels have no history.',       priority: 'high',    tip: 0.10 },
+  { title: 'Check Tron RPC latency and failover',     desc: 'Ping trongrid.io — switch provider if latency exceeds 500ms.',      priority: 'medium', tip: 0 },
+  { title: 'Validate peer Noise XX handshakes',       desc: 'Confirm all connected peers have valid encrypted channels.',         priority: 'medium', tip: 0 },
+  { title: 'Purge stale RFQ quotes from network',    desc: 'Remove expired quotes older than 5 minutes from the network.',      priority: 'medium',    tip: 0 },
+  { title: 'Monitor USD₮ escrow timeout windows',    desc: 'Scan open trades for approaching Tron deadlines and alert peers.',  priority: 'low',   tip: 0 },
+  { title: 'Confirm swap settlement on Tron',         desc: 'Verify counterparty received USD₮ before closing the trade.',      priority: 'low',   tip: 0 },
+  { title: 'Sync agent state to Intercom peers',      desc: 'Broadcast current balance and task capacity to the network.',      priority: 'low',    tip: 0 },
 ];
 
 function pickNewTask() {
@@ -333,6 +526,8 @@ function enqueueTask(def) {
   taskQueue.push(task);
   broadcast('task:created', { title: task.title, priority: task.priority, tip: task.tip, desc: task.desc });
   console.log(`\n📋 [LOOP] Queued: "${task.title}" | ${task.priority} | ${task.tip} USDT`);
+  // Broadcast to Hyperswarm peers so Agent B can pick it up
+  broadcastTaskToPeers(task);
   return task;
 }
 
@@ -349,7 +544,7 @@ async function autonomousLoopTick() {
       const def = pickNewTask();
       if (def) {
         const task = enqueueTask(def);
-        broadcast('agent:reasoning', { text: `Network scan: detected work — "${task.title}" | ${task.priority} | ${task.tip} USDT. Queued.` });
+        broadcast('agent:reasoning', { text: `Network scan: detected work — "${task.title}" | ${task.priority} | ${task.tip} USDT. Queued. Broadcasting to ${swarmPeers.size} peer(s).` });
       } else {
         broadcast('agent:reasoning', { text: `All ${done.length} tasks complete. Total paid: ${agent.totalPaidUsdt.toFixed(4)} USD₮. Monitoring for new work...` });
         broadcast('agent:action', { action: 'BROADCAST', details: { tasksCompleted: agent.tasksCompleted, totalPaid: agent.totalPaidUsdt } });
@@ -357,19 +552,27 @@ async function autonomousLoopTick() {
       loopBusy = false; return;
     }
 
-    // 2. Pick up a todo
+    // 2. Pick up a todo — only if no peers available to do it
     if (todos.length > 0 && inProgress.length === 0) {
+      // If peers are connected, prefer letting them pick up
+      if (swarmPeers.size > 0) {
+        broadcast('agent:reasoning', { text: `${todos.length} task(s) available. ${swarmPeers.size} peer(s) online — broadcasting for pickup...` });
+        broadcastToPeers({ type: 'task:reminder', tasks: todos.map(t => ({ id: t.id, title: t.title, priority: t.priority, tip: t.tip })) });
+        loopBusy = false; return;
+      }
+
+      // No peers — handle it ourselves
       const target = todos.find(t => t.priority === 'high') || todos.find(t => t.priority === 'medium') || todos[0];
       broadcast('agent:status', { status: 'Reasoning...' });
-      const reasoning = await agentReason(`Task: "${target.title}" | ${target.priority} | ${target.tip} USDT. Pick up?`);
+      const reasoning = await agentReason(`Task: "${target.title}" | ${target.priority} | ${target.tip} USDT. No peers online. Pick up myself?`);
       const action    = extractAction(reasoning);
       broadcast('agent:reasoning', { text: reasoning });
       broadcast('agent:action',    { action, details: { title: target.title, priority: target.priority } });
       if (['PICK_UP','COMPLETE','SEND_TIP'].includes(action)) {
-        target.status = 'inprogress'; target.createdAt = Date.now();
+        target.status = 'inprogress'; target.claimedBy = CONFIG.agentName; target.createdAt = Date.now();
         broadcast('task:pickedup', { title: target.title, assignee: 'PaydayAgent' });
         broadcast('agent:status',  { status: 'Working...' });
-        console.log(`\n🤖 [LOOP] Picked up: "${target.title}"`);
+        console.log(`\n🤖 [LOOP] Picked up (self): "${target.title}"`);
         recordAudit('PICK_UP', { title: target.title }, reasoning.slice(0, 80));
       } else if (action === 'PAUSE') {
         agent.paused = true; agent.pauseReason = 'Self-paused: low balance';
@@ -381,9 +584,16 @@ async function autonomousLoopTick() {
       loopBusy = false; return;
     }
 
-    // 3. Complete in-progress
+    // 3. Complete self-assigned in-progress tasks
     if (inProgress.length > 0) {
-      const target  = inProgress[0];
+      const selfTasks = inProgress.filter(t => t.claimedBy === CONFIG.agentName);
+      if (selfTasks.length === 0) {
+        // Peer-claimed tasks — wait for peer:done message
+        broadcast('agent:reasoning', { text: `Waiting for peer to complete in-progress task...` });
+        loopBusy = false; return;
+      }
+
+      const target  = selfTasks[0];
       const elapsed = Date.now() - target.createdAt;
       if (elapsed < CONFIG.loopWorkMs) {
         const remaining = Math.round((CONFIG.loopWorkMs - elapsed) / 1000);
@@ -395,18 +605,34 @@ async function autonomousLoopTick() {
       const action    = extractAction(reasoning);
       broadcast('agent:reasoning', { text: reasoning });
       broadcast('agent:action',    { action, details: { title: target.title, tip: target.tip } });
-      if (['SEND_TIP','COMPLETE'].includes(action)) {
-        console.log(`\n✅ [LOOP] Completing "${target.title}" → ${target.tip} USDT`);
-        const result = await sendUsdtPayment(globalTronAccount, process.env.PEER_TRON_ADDRESS || agent.tronAddress, target.tip, target.title);
-        if (result) {
-          target.status = 'done';
-          broadcast('task:completed', { title: target.title, txHash: result.hash, tip: target.tip });
-          const next = pickNewTask();
-          if (next) setTimeout(() => enqueueTask(next), 4000);
-        } else {
-          target.createdAt = Date.now(); // reset timer, retry next tick
-        }
-      } else if (action === 'PAUSE') {
+  if (['SEND_TIP','COMPLETE'].includes(action)) {
+  if (target.tip === 0) {
+    // Free task — complete without payment
+    target.status = 'done';
+    broadcast('task:completed', { title: target.title, txHash: null, tip: 0 });
+    broadcast('agent:reasoning', { text: `Task "${target.title}" completed. No payment — medium/low priority. Conserving USDT.` });
+    recordAudit('COMPLETE_FREE', { title: target.title }, 'NO_PAYMENT');
+    const next = pickNewTask();
+    if (next) setTimeout(() => enqueueTask(next), 4000);
+  } else {
+    // Paid task — send real USDT
+    console.log(`\n✅ [LOOP] Self-completing "${target.title}" → ${target.tip} USDT`);
+    const recipient = process.env.PEER_TRON_ADDRESS || agent.tronAddress;
+    const result = await sendUsdtPayment(globalTronAccount, recipient, target.tip, target.title);
+    if (result) {
+      target.status = 'done';
+      broadcast('task:completed', { title: target.title, txHash: result.hash, tip: target.tip });
+      const next = pickNewTask();
+      if (next) setTimeout(() => enqueueTask(next), 4000);
+    } else {
+      target.status = 'done';
+      recordAudit('SKIP_UNBLOCKABLE', { title: target.title }, 'blocked');
+      broadcast('agent:reasoning', { text: `Payment blocked for "${target.title}" — skipping to next task.` });
+      const next = pickNewTask();
+      if (next) setTimeout(() => enqueueTask(next), 4000);
+    }
+  }
+} else if (action === 'PAUSE') {
         agent.paused = true; agent.pauseReason = 'Low balance';
         broadcast('agent:paused', { reason: agent.pauseReason });
       } else {
@@ -425,17 +651,17 @@ async function autonomousLoopTick() {
 function startAutonomousLoop() {
   const tick = CONFIG.loopTickMs; const work = CONFIG.loopWorkMs;
   console.log(`\n🔄 Autonomous loop started — tick every ${tick/1000}s | work time ${work/1000}s`);
-  console.log(`   Agent picks up tasks, works, and pays — no human input required`);
-  broadcast('agent:reasoning', { text: `Autonomous loop active. Tick: ${tick/1000}s. Agent operates independently — no human input required.` });
+  console.log(`   Peers online: ${swarmPeers.size} — agent will broadcast tasks to peers first`);
+  broadcast('agent:reasoning', { text: `Autonomous loop active. Tick: ${tick/1000}s. Hyperswarm P2P enabled — broadcasting tasks to peers.` });
   const first = pickNewTask();
   if (first) enqueueTask(first);
-  setTimeout(autonomousLoopTick, 5000);
+  setTimeout(autonomousLoopTick, 15000);
   setInterval(autonomousLoopTick, tick);
 }
 
 // ── CLI ────────────────────────────────────────────────────
 async function startCLI() {
-  console.log(`\n📡 CLI: balance | loop | safety | audit | tip <addr> <amt> | pause | resume | confirm | reject | clients | quit`);
+  console.log(`\n📡 CLI: balance | loop | peers | safety | audit | tip <addr> <amt> | pause | resume | confirm | reject | clients | quit`);
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '\nPaydayAgent > ' });
   rl.prompt();
   rl.on('line', async (line) => {
@@ -445,12 +671,16 @@ async function startCLI() {
         if (globalTronAccount) await refreshBalances(globalTronAccount, globalSolAccount);
         console.log(`\n💰 USDT: ${agent.usdtBalance.toFixed(4)} | SOL: ${agent.solBalance.toFixed(6)}`);
         console.log(`   Tron: ${agent.tronAddress}\n   Sol : ${agent.solAddress}`);
+      } else if (cmd === 'peers') {
+        console.log(`\n🌐 Hyperswarm peers (${swarmPeers.size}):`);
+        if (swarmPeers.size === 0) console.log('   None connected yet');
+        for (const [name, p] of swarmPeers.entries()) console.log(`   ${name} | Tron: ${p.tronAddress}`);
       } else if (cmd === 'loop') {
         const t = taskQueue.filter(q => q.status === 'todo').length;
         const i = taskQueue.filter(q => q.status === 'inprogress').length;
         const d = taskQueue.filter(q => q.status === 'done').length;
         console.log(`\n🔄 Loop: todo=${t} in-progress=${i} done=${d} busy=${loopBusy}`);
-        taskQueue.slice(-5).forEach((q, n) => console.log(`   [${n+1}] ${q.status.padEnd(12)} ${q.title}`));
+        taskQueue.slice(-5).forEach((q, n) => console.log(`   [${n+1}] ${q.status.padEnd(12)} ${q.claimedBy || '?'} | ${q.title}`));
       } else if (cmd === 'tip') {
         const addr = parts[1]; const amt = parseFloat(parts[2]) || CONFIG.tron.defaultTip;
         if (!addr) console.log('Usage: tip <tron-address> <usdt-amount>');
@@ -480,9 +710,11 @@ async function startCLI() {
       } else if (cmd === 'reject') {
         if (agent.pendingPayment) { recordAudit('REJECTED', agent.pendingPayment, 'CLI'); agent.pendingPayment = null; console.log(`\n❌ Rejected`); }
       } else if (cmd === 'clients') {
-        console.log(`\n🌐 ${clients.size} client(s)`);
+        console.log(`\n🌐 ${clients.size} UI client(s) | ${swarmPeers.size} Hyperswarm peer(s)`);
       } else if (cmd === 'quit' || cmd === 'exit') {
-        console.log(`\n📋 ${agent.tasksCompleted} tasks | ${agent.totalPaidUsdt.toFixed(4)} USDT paid`); process.exit(0);
+        console.log(`\n📋 ${agent.tasksCompleted} tasks | ${agent.totalPaidUsdt.toFixed(4)} USDT paid`);
+        await swarm?.destroy();
+        process.exit(0);
       } else if (cmd) { console.log(`Unknown: "${cmd}"`); }
     } catch (err) { console.error(`\n❌ ${err.message}`); }
     rl.prompt();
@@ -495,18 +727,20 @@ async function main() {
 ╔══════════════════════════════════════════════════════════╗
 ║        INTERCOM PAYDAY — WDK Autonomous Wallet Agent     ║
 ║   Groq Llama 3 · WDK Tron mainnet · WDK Solana devnet   ║
-║   Autonomous Loop · WebSocket · No Human Input Required  ║
+║   Autonomous Loop · WebSocket · Hyperswarm P2P           ║
 ║         Hackathon Galáctica: Agent Wallets Track         ║
 ╚══════════════════════════════════════════════════════════╝`);
   try {
     startWebSocketServer();
     await initWallets();
+    startHyperswarm();           // ← P2P layer
     broadcast('balance:update', { usdt: agent.usdtBalance, sol: agent.solBalance, tronAddress: agent.tronAddress, solAddress: agent.solAddress });
-    startAutonomousLoop();       // ← agent runs itself from here
-    await startCLI();            // ← CLI alongside, not instead of
+    startAutonomousLoop();
+    await startCLI();
     setInterval(() => refreshBalances(globalTronAccount, globalSolAccount), 60_000);
-    process.on('SIGINT', () => {
+    process.on('SIGINT', async () => {
       console.log(`\n\n📋 ${agent.tasksCompleted} tasks | ${agent.totalPaidUsdt.toFixed(4)} USDT paid\n👋 Shutting down...`);
+      await swarm?.destroy();
       process.exit(0);
     });
   } catch (err) {
