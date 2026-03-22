@@ -9,6 +9,7 @@
 
 import WalletManagerSolana from '@tetherto/wdk-wallet-solana';
 import WalletManagerTron   from '@tetherto/wdk-wallet-tron';
+import TronWeb from 'tronweb';
 import Groq                from 'groq-sdk';
 import { WebSocketServer } from 'ws';
 import { createInterface } from 'readline';
@@ -23,7 +24,7 @@ const CONFIG = {
     usdtContract: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
     decimals:     6,
     maxFee:       40_000_000,
-    defaultTip:   parseFloat(process.env.USDT_DEFAULT_TIP)    || 0.05,
+    defaultTip:   parseFloat(process.env.USDT_DEFAULT_TIP)    || 0.10,
     maxTipPerTx:  parseFloat(process.env.USDT_MAX_TIP_PER_TX) || 0.10,
     dailyCap:     parseFloat(process.env.USDT_DAILY_CAP)      || 0.50,
     lowBal:       parseFloat(process.env.USDT_LOW_BAL)        || 0.30,
@@ -58,6 +59,9 @@ const agent = {
   tasksCompleted: 0, totalPaidUsdt: 0, totalPaidSol: 0,
   auditLog: [], paused: false, pauseReason: '', pendingPayment: null,
 };
+
+const startTime = Date.now();
+const completedTitles = new Set();
 
 let globalTronAccount = null;
 let globalSolAccount  = null;
@@ -182,6 +186,17 @@ const pingInterval = setInterval(() => {
     const task = taskQueue.find(t => t.id === msg.taskId && t.status === 'inprogress');
     if (!task) return;
 
+     if (!task.tip || task.tip <= 0) {
+      task.status = 'done';
+      completedTitles.add(task.title);
+      console.log(`⏭️  [Hyperswarm] Zero-tip task — skipping payment: "${task.title}"`);
+      broadcast('task:completed', { title: task.title, txHash: null, tip: 0 });
+      sendToPeer(conn, { type: 'payment:sent', taskId: task.id, txHash: 'zero-tip', amount: 0, chain: 'tron', explorer: '' });
+      const next = pickNewTask();
+      if (next) setTimeout(() => { const t = enqueueTask(next); broadcastToPeers({ type: 'task:available', id: t.id, title: t.title, desc: t.desc, priority: t.priority, tip: t.tip }); }, 4000);
+      return;
+    }
+
     const peer = swarmPeers.get(msg.agentName);
     if (!peer) {
       console.log(`[Hyperswarm] Unknown peer ${msg.agentName} — cannot pay`);
@@ -196,6 +211,7 @@ const pingInterval = setInterval(() => {
       .then((result) => {
         if (result) {
           task.status = 'done';
+          completedTitles.add(task.title);
           broadcast('task:completed', { title: task.title, txHash: result.hash, tip: task.tip });
           // Notify Agent B that payment is sent
           sendToPeer(conn, {
@@ -222,7 +238,11 @@ const pingInterval = setInterval(() => {
             }, 4000);
           }
         } else {
-          task.createdAt = Date.now(); // retry
+          task.status = 'done';
+          completedTitles.add(task.title);
+          broadcast('agent:reasoning', { text: `Payment timed out for "${task.title}" — check Tronscan. Moving on.` });
+          const next = pickNewTask();
+          if (next) setTimeout(() => { const t = enqueueTask(next); broadcastToPeers({ type: 'task:available', id: t.id, title: t.title, desc: t.desc, priority: t.priority, tip: t.tip }); }, 4000);
         }
       });
   }
@@ -475,7 +495,14 @@ async function initWallets() {
   console.log(`   Balance : ${agent.solBalance.toFixed(6)} SOL${agent.solBalance < 0.01 ? ' ⚠️  fund at https://faucet.solana.com' : ''}`);
 
   console.log(`\n🔑 [2/2] WDK Tron (mainnet)...`);
-  const tronWallet  = new WalletManagerTron(seed, { provider: CONFIG.tron.provider, transferMaxFee: CONFIG.tron.maxFee });
+const tronWeb    = new TronWeb({
+  fullHost: CONFIG.tron.provider,
+  headers:  { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY },
+});
+const tronWallet = new WalletManagerTron(seed, { 
+  provider:       tronWeb, 
+  transferMaxFee: CONFIG.tron.maxFee 
+});
   globalTronAccount = await tronWallet.getAccount(0);
   agent.tronAddress = await globalTronAccount.getAddress();
   agent.usdtBalance = Number(await globalTronAccount.getTokenBalance(CONFIG.tron.usdtContract)) / Math.pow(10, CONFIG.tron.decimals);
@@ -502,21 +529,15 @@ let   loopTaskId = 1;
 let   loopBusy   = false;
 
 const TASK_POOL = [
-  { title: 'Monitor 0000intercom for RFQ requests',   desc: 'Watch global rendezvous and respond to swap requests from peers.',    priority: 'high',   tip: 0.10 },
-  { title: 'Verify Tron escrow before USD₮ release',  desc: 'Check on-chain escrow state before authorising WDK payment.',        priority: 'high',   tip: 0.10 },
-  { title: 'Replicate subnet state to 3 peers',       desc: 'Ensure contract state is consistent across all active Trac peers.',  priority: 'high', tip: 0.10 },
-  { title: 'Broadcast svc_announce to sidechannel',   desc: 'Re-post service announcement — sidechannels have no history.',       priority: 'high',    tip: 0.10 },
-  { title: 'Check Tron RPC latency and failover',     desc: 'Ping trongrid.io — switch provider if latency exceeds 500ms.',      priority: 'medium', tip: 0 },
-  { title: 'Validate peer Noise XX handshakes',       desc: 'Confirm all connected peers have valid encrypted channels.',         priority: 'medium', tip: 0 },
-  { title: 'Purge stale RFQ quotes from network',    desc: 'Remove expired quotes older than 5 minutes from the network.',      priority: 'medium',    tip: 0 },
-  { title: 'Monitor USD₮ escrow timeout windows',    desc: 'Scan open trades for approaching Tron deadlines and alert peers.',  priority: 'low',   tip: 0 },
-  { title: 'Confirm swap settlement on Tron',         desc: 'Verify counterparty received USD₮ before closing the trade.',      priority: 'low',   tip: 0 },
-  { title: 'Sync agent state to Intercom peers',      desc: 'Broadcast current balance and task capacity to the network.',      priority: 'low',    tip: 0 },
+  { title: 'Monitor 0000intercom for RFQ requests', desc: 'Watch global rendezvous and respond to swap requests from peers.', priority: 'high', tip: 0.10 },
+  { title: 'Verify Tron escrow before USD₮ release', desc: 'Check on-chain escrow state before authorising WDK payment.', priority: 'high', tip: 0.10 },
+  { title: 'Replicate subnet state to 3 peers', desc: 'Ensure contract state is consistent across all active Trac peers.', priority: 'medium', tip: 0 },
+  { title: 'Broadcast svc_announce to sidechannel', desc: 'Re-post service announcement.', priority: 'low', tip: 0 },
 ];
 
 function pickNewTask() {
   const active    = new Set(taskQueue.filter(t => t.status !== 'done').map(t => t.title));
-  const available = TASK_POOL.filter(t => !active.has(t.title));
+  const available = TASK_POOL.filter(t => !active.has(t.title) && t.tip > 0 && !completedTitles.has(t.title));
   if (!available.length) return null;
   return available[Math.floor(Math.random() * available.length)];
 }
@@ -556,10 +577,15 @@ async function autonomousLoopTick() {
     if (todos.length > 0 && inProgress.length === 0) {
       // If peers are connected, prefer letting them pick up
       if (swarmPeers.size > 0) {
-        broadcast('agent:reasoning', { text: `${todos.length} task(s) available. ${swarmPeers.size} peer(s) online — broadcasting for pickup...` });
+        broadcast('agent:reasoning', { text: `${todos.length} task(s) queued. ${swarmPeers.size} peer(s) online — broadcasting for pickup...` });
         broadcastToPeers({ type: 'task:reminder', tasks: todos.map(t => ({ id: t.id, title: t.title, priority: t.priority, tip: t.tip })) });
         loopBusy = false; return;
       }
+      
+        if (swarmPeers.size === 0 && Date.now() - startTime < 30000) {
+          broadcast('agent:reasoning', { text: `Waiting for peers to connect...` });
+          loopBusy = false; return;
+        }
 
       // No peers — handle it ourselves
       const target = todos.find(t => t.priority === 'high') || todos.find(t => t.priority === 'medium') || todos[0];
@@ -621,16 +647,17 @@ async function autonomousLoopTick() {
     const result = await sendUsdtPayment(globalTronAccount, recipient, target.tip, target.title);
     if (result) {
       target.status = 'done';
+      completedTitles.add(target.title);
       broadcast('task:completed', { title: target.title, txHash: result.hash, tip: target.tip });
       const next = pickNewTask();
       if (next) setTimeout(() => enqueueTask(next), 4000);
-    } else {
-      target.status = 'done';
-      recordAudit('SKIP_UNBLOCKABLE', { title: target.title }, 'blocked');
-      broadcast('agent:reasoning', { text: `Payment blocked for "${target.title}" — skipping to next task.` });
-      const next = pickNewTask();
-      if (next) setTimeout(() => enqueueTask(next), 4000);
-    }
+   } else {
+          target.status = 'done';
+          completedTitles.add(target.title);
+          broadcast('agent:reasoning', { text: `Payment timed out for "${target.title}" — check Tronscan. Moving on.` });
+          const next = pickNewTask();
+          if (next) setTimeout(() => enqueueTask(next), 4000);
+        }
   }
 } else if (action === 'PAUSE') {
         agent.paused = true; agent.pauseReason = 'Low balance';

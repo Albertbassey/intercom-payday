@@ -51,6 +51,7 @@ const agentB = {
 // Tasks currently known about / being worked on
 const knownTasks  = new Map(); // taskId → task object
 let   activeClaim = null;      // the one task currently in progress
+let pickupInProgress = false;
 
 // ── WDK Tron — derive address only (no spending) ──────────
 async function initWallet() {
@@ -112,6 +113,8 @@ function startHyperswarm() {
   console.log(`\n📡 Hyperswarm joined topic: ${CONFIG.channel}`);
 
   swarm.on('connection', (conn, info) => {
+    knownTasks.clear();
+    activeClaim = null;
     const keyHex = info.publicKey.toString('hex');
 
     // Ignore duplicate connections
@@ -247,7 +250,8 @@ async function handlePeerMessage(conn, msg) {
 }
 
 async function considerPickup(conn) {
-  if (activeClaim) return; // already working
+  if (activeClaim || pickupInProgress) return; // already working
+     pickupInProgress = true;
 
   // Find best available task — prioritise high
   const available = [...knownTasks.values()].filter(t => t.status === 'available');
@@ -287,9 +291,11 @@ async function considerPickup(conn) {
     const remaining = available.filter(t => t.id !== target.id);
     if (remaining.length > 0) await considerPickup(conn);
   }
+  pickupInProgress = false;
 }
 
 async function reportTaskDone(conn, task) {
+  if (!task) return;
   console.log(`\n✅ [Work complete] "${task.title}" — reporting to Agent A`);
   sendToPeer(conn, {
     type:      'task:done',
