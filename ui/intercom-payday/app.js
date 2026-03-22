@@ -10,7 +10,7 @@ const CFG = {
   agentName:    'PaydayAgent',
   usdtContract: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
   channel:      '0000intercom',
-  defaultTip:   0.10,
+  defaultTip:   0.01,
   wsUrl:        'ws://localhost:8080',
 };
 
@@ -21,6 +21,9 @@ const AVATARS = {
   'SwapBot-α':   { bg: 'rgba(34,197,94,0.12)',      color: 'var(--green)',  init: 'SB' },
   'Unassigned':  { bg: 'var(--bg4)',                color: 'var(--muted)',  init: '?' },
 };
+
+// Dynamic peers from Hyperswarm (populated at runtime)
+const livePeers = new Map(); // name → { tronAddress }
 
 // ── STATE ─────────────────────────────────────────────────
 let tasks        = [];
@@ -44,7 +47,6 @@ function connectWebSocket() {
     console.log('[WS] Connected to agent');
     updateConnectionStatus(true);
     addFeed('🔌', 'Connected to PaydayAgent WebSocket bridge — live data active', 'var(--green)', 'rgba(34,197,94,0.12)');
-    // Request fresh balance on connect
     wsSend('balance:refresh', {});
   };
 
@@ -102,8 +104,8 @@ function handleAgentEvent(msg) {
   switch (type) {
 
     case 'balance:update': {
-      usdtBalance = msg.usdt  ?? usdtBalance;
-      solBalance  = msg.sol   ?? solBalance;
+      usdtBalance = msg.usdt        ?? usdtBalance;
+      solBalance  = msg.sol         ?? solBalance;
       tronAddress = msg.tronAddress ?? tronAddress;
       solAddress  = msg.solAddress  ?? solAddress;
       updateWalletUI();
@@ -135,28 +137,25 @@ function handleAgentEvent(msg) {
     case 'payment:sent': {
       const { txHash, amount, chain, taskName, explorer } = msg;
 
-      // Update stats
       stats.tips++;
       stats.total  += amount;
       usdtBalance   = Math.max(0, usdtBalance - (chain === 'tron' ? amount : 0));
       updateWalletUI();
       updateStats();
 
-      // Mark matching task as done+paid
+      // Mark matching task done+paid
       const t = tasks.find(x => x.title === taskName && x.status !== 'done');
       if (t) {
-        t.status  = 'done';
-        t.txHash  = txHash;
-        t.chain   = chain;
-        t.paid    = true;
+        t.status = 'done';
+        t.txHash = txHash;
+        t.chain  = chain;
+        t.paid   = true;
         stats.completed++;
         renderAll();
       }
 
-      // Add real tx to transaction list
       addTx(amount, txHash, taskName, 'confirmed', chain, explorer);
 
-      // Feed + overlay
       const chainLabel = chain === 'tron' ? 'Tron mainnet' : 'Solana devnet';
       addFeed('✅', `WDK confirmed: ${amount} USD₮ sent on ${chainLabel}`, 'var(--gold)', 'var(--gold-dim)');
       addFeed('🔗', `TX: ${txHash.slice(0, 24)}... → ${explorer}`, 'var(--muted)', 'var(--bg3)');
@@ -165,17 +164,30 @@ function handleAgentEvent(msg) {
       break;
     }
 
+    // ── FIX: handle task:completed broadcast from agent loop ──
+    case 'task:completed': {
+      const t = tasks.find(x => x.title === msg.title && x.status !== 'done');
+      if (t) {
+        t.status = 'done';
+        t.txHash = msg.txHash || null;
+        t.chain  = 'tron';
+        t.paid   = true;
+        stats.completed++;
+        renderAll();
+      }
+      addFeed('✅', `Task completed: "${msg.title}" — ${msg.tip} USD₮ paid`, 'var(--gold)', 'var(--gold-dim)');
+      break;
+    }
+
     case 'payment:blocked': {
-      const { reason, amount, chain } = msg;
       hidePayOverlayImmediately();
-      addFeed('🛡️', `Payment blocked: ${reason}`, 'var(--red)', 'rgba(239,68,68,0.12)');
-      showToast(`⛔ Payment blocked: ${reason}`);
+      addFeed('🛡️', `Payment blocked: ${msg.reason}`, 'var(--red)', 'rgba(239,68,68,0.12)');
+      showToast(`⛔ Payment blocked: ${msg.reason}`);
       break;
     }
 
     case 'payment:queued': {
-      const { amount, taskName } = msg;
-      addFeed('⏳', `Supervised: ${amount} USDT queued for "${taskName}" — confirm/reject in CLI`, 'var(--amber)', 'rgba(245,158,11,0.12)');
+      addFeed('⏳', `Supervised: ${msg.amount} USDT queued for "${msg.taskName}" — confirm/reject in CLI`, 'var(--amber)', 'rgba(245,158,11,0.12)');
       showToast(`⏳ Payment queued — approve in agent CLI`);
       break;
     }
@@ -184,22 +196,50 @@ function handleAgentEvent(msg) {
       const { title, assignee } = msg;
       const t = tasks.find(x => x.title === title && x.status === 'todo');
       if (t) { t.status = 'inprogress'; t.assignee = assignee || 'PaydayAgent'; renderAll(); }
-      addFeed('🤖', `Agent picked up: "${title}"`, 'var(--gold)', 'var(--gold-dim)');
+      const isLivePeer = assignee && assignee !== 'PaydayAgent';
+      const icon = isLivePeer ? '🤝' : '🤖';
+      addFeed(icon, `${assignee} picked up: "${title}"`, 'var(--gold)', 'var(--gold-dim)');
       break;
     }
 
     case 'task:created': {
-      const { title, priority, tip } = msg;
-      tasks.push({
-        id: nextId++, title,
-        desc:     'Created by autonomous agent',
-        assignee: 'PaydayAgent',
-        priority: priority || 'medium',
-        tip:      tip || CFG.defaultTip,
-        status:   'todo',
-      });
-      renderAll();
+      const { title, priority, tip, desc } = msg;
+      // Avoid duplicates if UI already added it
+      if (!tasks.find(x => x.title === title && x.status === 'todo')) {
+        tasks.push({
+          id:       nextId++,
+          title,
+          desc:     desc || 'Created by autonomous agent',
+          assignee: 'PaydayAgent',
+          priority: priority || 'medium',
+          tip:      tip || CFG.defaultTip,
+          status:   'todo',
+        });
+        renderAll();
+      }
       addFeed('➕', `Agent created task: "${title}"`, 'var(--green)', 'rgba(34,197,94,0.12)');
+      break;
+    }
+
+    // ── NEW: live peer joined via Hyperswarm ──────────────
+    case 'peer:joined': {
+      const { name, tronAddress: peerAddr } = msg;
+      if (name === CFG.agentName) break; // don't add ourselves
+      livePeers.set(name, { tronAddress: peerAddr });
+      renderPeersList();
+      addFeed('🔗', `Hyperswarm peer joined: ${name} | Tron: ${peerAddr ? peerAddr.slice(0,14) + '...' : '?'}`, 'var(--green)', 'rgba(34,197,94,0.12)');
+      document.getElementById('peerCount').textContent = (1 + livePeers.size) + ' peers';
+      showToast(`🤝 ${name} joined the network`);
+      break;
+    }
+
+    // ── NEW: live peer left ───────────────────────────────
+    case 'peer:left': {
+      const { name } = msg;
+      livePeers.delete(name);
+      renderPeersList();
+      addFeed('👋', `Peer disconnected: ${name}`, 'var(--amber)', 'rgba(245,158,11,0.12)');
+      document.getElementById('peerCount').textContent = (1 + livePeers.size) + ' peers';
       break;
     }
 
@@ -221,6 +261,31 @@ function handleAgentEvent(msg) {
   }
 }
 
+// ── PEERS LIST RENDERER ───────────────────────────────────
+function renderPeersList() {
+  const list = document.querySelector('.peers-list');
+  if (!list) return;
+
+  // Always keep PaydayAgent (YOU) row first — it's hardcoded in HTML, just update status
+  // Remove any dynamically added peer rows
+  list.querySelectorAll('.peer-row.dynamic').forEach(el => el.remove());
+
+  // Add live peers
+  for (const [name, peer] of livePeers.entries()) {
+    const initials = name.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '??';
+    const row = document.createElement('div');
+    row.className = 'peer-row dynamic';
+    row.innerHTML = `
+      <div class="peer-av" style="background:rgba(34,197,94,0.12);color:var(--green)">${initials}</div>
+      <div class="peer-info">
+        <div class="peer-name">${esc(name)} <span class="you-tag" style="background:rgba(34,197,94,0.2);color:var(--green)">P2P</span></div>
+        <div class="peer-sub">${peer.tronAddress ? peer.tronAddress.slice(0,14) + '...' : 'Active'}</div>
+      </div>
+      <div class="online-dot" style="background:var(--green);box-shadow:0 0 6px var(--green)"></div>`;
+    list.appendChild(row);
+  }
+}
+
 // ── SEED TASKS ────────────────────────────────────────────
 const SEED_TASKS = [
   {
@@ -231,7 +296,7 @@ const SEED_TASKS = [
   {
     title:    'Verify Tron escrow before USD₮ release',
     desc:     'Check escrow contract on Tron before payment is authorised via WDK.',
-    assignee: 'Agent-7f3a', priority: 'high', tip: 0.25, status: 'inprogress',
+    assignee: 'Agent-7f3a', priority: 'high', tip: 0.10, status: 'inprogress',
   },
   {
     title:    'Replicate subnet state to 3 peers',
@@ -241,7 +306,7 @@ const SEED_TASKS = [
   {
     title:    'Broadcast svc_announce to sidechannel',
     desc:     'Post service announcement — sidechannels have no history so must repeat.',
-    assignee: 'SwapBot-α', priority: 'low', tip: 0.05, status: 'todo',
+    assignee: 'SwapBot-α', priority: 'low', tip: 0.10, status: 'todo',
   },
 ];
 
@@ -330,7 +395,11 @@ function renderCol(status) {
 function buildCard(task) {
   const card = document.createElement('div');
   card.className = 'task-card' + (task.status === 'done' ? ' done-card' : '');
-  const av = AVATARS[task.assignee] || AVATARS['Unassigned'];
+  const av = AVATARS[task.assignee] || {
+    bg:    'rgba(34,197,94,0.12)',
+    color: 'var(--green)',
+    init:  task.assignee ? task.assignee.slice(0, 2).toUpperCase() : '??',
+  };
 
   card.innerHTML = `
     <div class="task-top">
@@ -362,8 +431,8 @@ function buildActions(task) {
     </div>`;
   }
   if (task.status === 'done') {
-    const chain    = task.chain || 'tron';
-    const explorer = chain === 'tron'
+    const chain      = task.chain || 'tron';
+    const explorer   = chain === 'tron'
       ? `https://tronscan.org/#/transaction/${task.txHash}`
       : `https://explorer.solana.com/tx/${task.txHash}?cluster=devnet`;
     const chainLabel = chain === 'tron' ? 'Tron' : 'Solana';
@@ -380,7 +449,6 @@ window.moveTask = function(id, status) {
   if (!t) return;
   t.status = status;
   renderAll();
-  // Notify agent
   wsSend('task:start', { title: t.title });
   addFeed('▶', `Task started: "${t.title}"`, 'var(--blue)', 'rgba(59,130,246,0.12)');
   showToast('Task moved to In Progress');
@@ -389,12 +457,8 @@ window.moveTask = function(id, status) {
 window.completeTask = function(id) {
   const t = tasks.find(x => x.id === id);
   if (!t) return;
-
-  // Show payment overlay immediately — real tx is in flight
   showPayOverlay(`Sending ${t.tip} USD₮`, `→ ${t.assignee} via WDK Tron`);
   addFeed('💸', `Triggering WDK payment: ${t.tip} USD₮ → ${t.assignee}`, 'var(--gold)', 'var(--gold-dim)');
-
-  // Send to real agent — it will broadcast payment:sent or payment:blocked back
   wsSend('task:complete', { title: t.title, tip: t.tip, assignee: t.assignee });
 };
 
@@ -439,12 +503,10 @@ function createTask() {
 
   if (!title) { showToast('Please enter a task title'); return; }
 
-  // Add to local UI immediately
   tasks.push({ id: nextId++, title, desc: desc || 'No description.', assignee, priority, tip, status: 'todo' });
   closeModal();
   renderAll();
 
-  // Send to agent for reasoning
   wsSend('task:create', { title, desc, priority, tip, assignee });
   addFeed('➕', `New task: "${title}" → ${assignee} — agent evaluating...`, 'var(--green)', 'rgba(34,197,94,0.12)');
   showToast('Task created — agent is reasoning...');
@@ -466,8 +528,11 @@ function startNetworkChatter() {
   setInterval(() => {
     const m = msgs[Math.floor(Math.random() * msgs.length)];
     addFeed(...m);
-    document.getElementById('peerCount').textContent =
-      (3 + Math.floor(Math.random() * 4)) + ' peers';
+    // Only update peer count if no live peers yet (once live peers join, count is accurate)
+    if (livePeers.size === 0) {
+      document.getElementById('peerCount').textContent =
+        (3 + Math.floor(Math.random() * 4)) + ' peers';
+    }
   }, 7000 + Math.random() * 5000);
 }
 
@@ -525,7 +590,6 @@ function showPayOverlay(title, sub) {
   document.getElementById('payAmount').textContent = sub;
   document.getElementById('payHash').textContent   = '';
   document.getElementById('payOverlay').classList.remove('hidden');
-  // Safety timeout — hide after 30s even if no response
   payOverlayTimeout = setTimeout(hidePayOverlayImmediately, 30_000);
 }
 
